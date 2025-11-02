@@ -1,16 +1,26 @@
 # ForgeX — Universal Project Bundler
 
-ForgeX is a desktop app (Electron) with a React + Vite + TypeScript frontend and a FastAPI backend. It detects project types, lets you configure build options, runs builds in a sandbox, streams logs in real-time, and stores build history in SQLite.
+Pinned — How to run your app (Working directory + Start command)
+- Working directory controls where the command runs inside your uploaded project.
+- If your entry is in a subfolder (e.g., test/main.py):
+  - Working directory = . and Start command = uvicorn test.main:app --host 127.0.0.1 --port 8000
+  - OR Working directory = test and Start command = uvicorn main:app --host 127.0.0.1 --port 8000
+- For a single script: Start command = python path/to/script.py
+- Use 127.0.0.1 or 0.0.0.0 as host (127.0.0 is invalid).
 
-Main features
-- Import folder or zip
-- Auto-detect language (Python, Node, Java, Go, Batch, Rust, C#)
-- Edit start command and advanced options
-- Choose output formats (.exe/.msi/.app/.AppImage/.deb/.zip)
-- Python end-to-end build via PyInstaller with venv
-- Real-time log streaming via WebSocket
-- Build history in SQLite at ~/.forgex/forgex.db
-- Electron-packaged app via electron-builder
+Quick usage
+1) Backend: pip install -r backend/requirements.txt
+2) Frontend: cd frontend && npm install
+3) Dev: python dev.py (opens backend + frontend)
+4) In the UI: Upload your project → set Working directory + Start command → Start build → download EXE.
+
+ForgeX is a desktop app (Electron) with a React + Vite + TypeScript frontend and a FastAPI backend.
+
+Minimal features
+- Upload folder/zip
+- Set Working directory + Start command (see pinned section)
+- Build Python apps to a single EXE (PyInstaller)
+- View live logs and download artifacts
 
 Prereqs
 - Node.js 18+
@@ -36,64 +46,16 @@ Demonstration (Python Flask)
 - Configure uses suggested command python app.py
 - Start build -> venv + pip install + pyinstaller --onefile -> artifact appears under build/<project>/<build_id>/
 
-Start command examples and working directory
-- Working directory controls where the command runs relative to your project.
-- If your entry is in a subfolder (e.g., test/main.py), set either:
-  - Working directory = . and Start command = uvicorn test.main:app --host 127.0.0.1 --port 8000
-  - OR Working directory = test and Start command = uvicorn main:app --host 127.0.0.1 --port 8000
-- Use 127.0.0.1 or 0.0.0.0 as host (127.0.0 is invalid).
-- For plain scripts, use python path/to/script.py
 
-Running multiple processes (frontend + backend)
-- PyInstaller bundles one executable; to start multiple processes, create a small launcher script that spawns both and waits. Example launcher.py:
+Multiple processes
+- Use a small launcher.py to start both processes, then set Start command = python launcher.py
 
-  ```python
-  import subprocess, sys, os
-  procs = []
-  try:
-      # Adjust commands/paths as needed; use absolute or project-relative paths
-      procs.append(subprocess.Popen([sys.executable, "backend_app.py"], cwd=os.getcwd()))
-      procs.append(subprocess.Popen([sys.executable, "frontend_dev.py"], cwd=os.getcwd()))
-      # Wait until one exits; Ctrl+C closes both when running the built EXE in a console
-      exit_codes = [p.wait() for p in procs]
-      sys.exit(max(exit_codes) if exit_codes else 0)
-  finally:
-      for p in procs:
-          try: p.terminate()
-          except: pass
-  ```
 
-- Set Start command = python launcher.py (and include launcher.py in your project). This works cross‑platform and lets ForgeX package the orchestrator.
-- Alternatively on Windows, a .bat can start multiple programs, but the Python launcher is the most portable.
 
-Security & Sandboxing
-- Builds run in a temp workspace ~/.forgex/tmp
-- Python builds use a venv (.venv) for dependency isolation
-- Command whitelist and blacklist enforced in backend/api/utils/security.py
-- Per-build timeout default 20 minutes (FORGEX_BUILD_TIMEOUT)
 
-API
-- FastAPI endpoints in backend/api/routes.py per spec
-- WebSocket: ws://localhost:45555/ws/builds; send {"type":"subscribe","build_id":"..."}
 
-Electron IPC
-- Channels: forgex:import, forgex:start-build, forgex:cancel-build, forgex:status
 
-Testing & CI
-- Run pytest in backend (example test included):
-  - pip install pytest
-  - pytest
-- GitHub Actions workflow skeleton is in .github/workflows/ci.yml
 
-Notes
-- Node/Java/Go/Batch adapters are stubs with TODOs and clear guidance
-- TailwindCSS is configured via global.css; add tailwind/postcss configs if you customize
-- For installers (.msi/.dmg/.deb), ensure platform prerequisites are installed
-
-Deployment
-- See DEPLOYMENT.md for Render (backend) and Netlify (frontend) setup with commands and env vars
-
-## Platform-specific setup and usage
 
 The following instructions cover Windows, macOS, and Linux for development, packaging, and optional Windows code signing.
 

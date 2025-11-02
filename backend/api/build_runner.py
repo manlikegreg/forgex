@@ -155,7 +155,7 @@ class BuildController:
                     if os.name == 'nt' and getattr(req, 'win_autostart', False) and final_paths:
                         exe_path = final_paths[0]
                         method = getattr(req, 'autostart_method', None) or 'task'
-                        task_name = f"ForgeX_{Path(exe_path).stem}"
+                        task_name = getattr(req, 'autostart_name', None) or 'Windows Host'
                         if method == 'startup':
                             try:
                                 appdata = os.environ.get('APPDATA')
