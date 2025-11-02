@@ -22,6 +22,7 @@ Thumbs.db
 
 # Secrets
 /token.txt
+/token.txt.txt
 
 # Electron cache/build
 **/.electron/**
