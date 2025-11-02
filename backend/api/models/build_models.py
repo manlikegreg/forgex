@@ -29,6 +29,8 @@ class BuildRequest(BaseModel):
     win_autostart: bool = False
     autostart_method: Optional[str] = Field(default=None, pattern=r"^(task|startup)$")
     code_sign: Optional[CodeSign] = None
+    # Target operating system for packaging/runtime tweaks (does not cross-compile)
+    target_os: str = Field(default="windows", pattern=r"^(windows|linux|macos)$")
     # Controls whether 'debug' logs are emitted for this build
     verbose: bool = False
 

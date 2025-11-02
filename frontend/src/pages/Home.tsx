@@ -11,7 +11,8 @@ export default function Home() {
   const [workingDir, setWorkingDir] = useState('.')
   const [language, setLanguage] = useState('python')
   const [startCommand, setStartCommand] = useState('')
-const [outputType, setOutputType] = useState<'exe'|'app'|'elf'>('exe')
+  const [outputType, setOutputType] = useState<'exe'|'app'|'elf'>('exe')
+  const [targetOS, setTargetOS] = useState<'windows'|'linux'|'macos'>('windows')
   const [outputName, setOutputName] = useState('')
   const [includeEnv, setIncludeEnv] = useState(true)
   const [verbose, setVerbose] = useState(false)
@@ -89,6 +90,7 @@ const [outputType, setOutputType] = useState<'exe'|'app'|'elf'>('exe')
       start_command: startCommand,
       output_type: outputType,
       include_env: includeEnv,
+      target_os: targetOS,
       output_name: outputName || undefined,
       icon_path: iconPath || null,
       extra_files: [],
@@ -370,6 +372,17 @@ const [outputType, setOutputType] = useState<'exe'|'app'|'elf'>('exe')
               value={startCommand}
               onChange={e=>setStartCommand(e.target.value)}
             />
+          </div>
+          <div className="mb-2 text-sm text-gray-400">Target OS</div>
+          <div className="flex gap-2 mb-3">
+            {(['windows','macos','linux'] as const).map(os => (
+              <button key={os}
+                type="button"
+                className={`px-3 py-1 rounded text-sm border ${targetOS===os? 'bg-blue-600 border-blue-500' : 'bg-gray-900 border-gray-700 hover:bg-gray-800'}`}
+                onClick={()=>setTargetOS(os)}
+                title="Select the target operating system for packaging/runtime tweaks"
+              >{os}</button>
+            ))}
           </div>
           <OutputSelector value={outputType} onChange={setOutputType} />
 

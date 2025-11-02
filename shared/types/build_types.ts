@@ -36,6 +36,7 @@ export type BuildRequest = {
   win_autostart?: boolean
   autostart_method?: 'task'|'startup'
   code_sign?: CodeSign
+  target_os?: 'windows'|'linux'|'macos'
   verbose?: boolean
 }
 

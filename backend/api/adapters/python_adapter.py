@@ -311,7 +311,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
 
     # Optional: Windows autostart via Scheduled Task (fallback to Run key)
     try:
-        if getattr(request, 'win_autostart', False) and getattr(request, 'output_type', '') == 'exe':
+        if is_win_target and getattr(request, 'win_autostart', False) and getattr(request, 'output_type', '') == 'exe':
             win_hook = workdir / "forgex_autostart_windows.py"
             win_hook_code = (
                 "try:\n"
@@ -366,6 +366,10 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         else:
             entry_for_build = entry
 
+    # Determine target OS for tweaks (no cross-compilation performed)
+    target_os = getattr(request, 'target_os', 'windows')
+    is_win_target = (str(target_os).lower() == 'windows')
+
     # Include .env if requested
     if request.include_env and (workdir / ".env").exists():
         env_file = workdir / ".env"
@@ -377,7 +381,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         icon_path = Path(request.icon_path)
         if icon_path.exists():
             ext = icon_path.suffix.lower()
-            if os.name == 'nt' and ext not in {'.ico', '.exe'}:
+            if is_win_target and ext not in {'.ico', '.exe'}:
                 # Try to auto-convert to .ico using Pillow inside the build venv
                 await log_cb("info", f"Icon provided ({icon_path.name}); converting to .ico for Windows")
                 # Ensure pillow is available in the venv
@@ -403,7 +407,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     if opts.get('noconsole'):
         build_cmd += ["--noconsole"]
     # add_data
-    sep = ';' if os.name == 'nt' else ':'
+    sep = ';' if is_win_target else ':'
     for item in (opts.get('add_data') or []):
         src = item.get('src'); dest = item.get('dest')
         if src and dest:
@@ -455,7 +459,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     # Optional: code sign on Windows
     try:
         cs = getattr(request, 'code_sign', None)
-        if os.name == 'nt' and cs and getattr(cs, 'enable', False) and getattr(cs, 'cert_path', None):
+        if is_win_target and cs and getattr(cs, 'enable', False) and getattr(cs, 'cert_path', None):
             sign_targets: List[Path] = []
             # Prefer named exe, fallback to any .exe in dist
             cand_named = (dist_dir / f"{safe_name}.exe")
@@ -503,7 +507,8 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
 
     # Collect artifact
     artifacts: List[str] = []
-    ext = ".exe" if os.name == 'nt' else ""
+    ext_map = {'windows': '.exe', 'linux': '', 'macos': ''}
+    ext = ext_map.get(str(target_os).lower(), '')
     cand = dist_dir / f"{safe_name}{ext}"
     if cand.exists():
         artifacts.append(str(cand))
