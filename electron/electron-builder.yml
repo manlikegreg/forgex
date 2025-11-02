@@ -1,0 +1,35 @@
+appId: com.forgex.app
+productName: ForgeX
+asar: true
+files:
+  - from: ../frontend/dist
+    to: dist
+  - from: .
+    filter:
+      - ../electron/main.js
+      - ../electron/preload.js
+  - from: ..
+    to: resources/backend
+    filter:
+      - backend/**
+extraResources:
+  - from: ../backend
+    to: backend
+  - from: ../shared
+    to: shared
+directories:
+  output: ../build
+win:
+  target:
+    - nsis
+    - msi
+nsis:
+  oneClick: false
+mac:
+  target:
+    - dmg
+linux:
+  target:
+    - AppImage
+    - deb
+publish: null

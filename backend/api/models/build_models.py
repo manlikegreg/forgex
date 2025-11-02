@@ -1,0 +1,49 @@
+from __future__ import annotations
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field
+from datetime import datetime
+
+
+class CodeSign(BaseModel):
+    enable: bool = False
+    cert_path: Optional[str] = None
+    cert_password: Optional[str] = None  # Will not be logged
+    timestamp_url: Optional[str] = "http://timestamp.digicert.com"
+    description: Optional[str] = None
+    publisher: Optional[str] = None
+
+
+class BuildRequest(BaseModel):
+    project_path: str
+    working_dir: str = "."
+    language: str = Field(pattern=r"^(python)$")
+    start_command: str
+    output_type: str = Field(pattern=r"^(exe|app|elf)$")
+    include_env: bool = False
+    icon_path: Optional[str] = None
+    extra_files: List[str] = []
+    pyinstaller: Optional[Dict[str, Any]] = None
+    output_name: Optional[str] = None
+    pause_on_exit: bool = False
+    pause_on_exit_seconds: Optional[int] = 5
+    win_autostart: bool = False
+    autostart_method: Optional[str] = Field(default=None, pattern=r"^(task|startup)$")
+    code_sign: Optional[CodeSign] = None
+    # Controls whether 'debug' logs are emitted for this build
+    verbose: bool = False
+
+
+class BuildStatus(BaseModel):
+    build_id: str
+    status: str = Field(pattern=r"^(queued|running|success|failed|cancelled)$")
+    started_at: datetime
+    finished_at: Optional[datetime] = None
+    output_files: List[str] = []
+    error: Optional[str] = None
+
+
+class LogEvent(BaseModel):
+    build_id: str
+    timestamp: datetime
+    level: str = Field(pattern=r"^(info|warn|error|debug)$")
+    message: str

@@ -1,0 +1,14 @@
+[build]
+  command = "cd frontend && npm ci && npm run build"
+  publish = "frontend/dist"
+
+[build.environment]
+  NODE_VERSION = "18"
+  VITE_BACKEND_URL = "https://forgex-backend.onrender.com"
+  VITE_BACKEND_WS = "wss://forgex-backend.onrender.com"
+
+# Single Page App routing
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
