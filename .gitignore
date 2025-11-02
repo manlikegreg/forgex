@@ -20,6 +20,9 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Secrets
+/token.txt
+
 # Electron cache/build
 **/.electron/**
 **/.cache/**
