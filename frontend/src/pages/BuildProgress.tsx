@@ -24,7 +24,21 @@ export default function BuildProgress() {
     return () => { clearInterval(t); close() }
   }, [buildId])
 
-  const percent = status.status === 'running' ? 60 : status.status === 'success' ? 100 : status.status === 'failed' ? 100 : 10
+  function progressFromLogs(): number {
+    // Heuristic mapping of log phrases -> progress percentage
+    const txt = logs.map(l => l.message).join('\n')
+    if (/Phase: complete/i.test(txt) || /Build complete!/i.test(txt)) return 100
+    if (/Fixing EXE headers/i.test(txt) || /Building EXE from/i.test(txt)) return 90
+    if (/Copying icon/i.test(txt)) return 75
+    if (/Creating base_library\.zip/i.test(txt) || /Analyzing modules/i.test(txt)) return 65
+    if (/Phase: build/i.test(txt) || /PyInstaller cmd:/i.test(txt)) return 55
+    if (/Successfully installed pyinstaller/i.test(txt)) return 45
+    if (/Phase: install deps/i.test(txt) || /Installing requirements/i.test(txt)) return 30
+    if (/Phase: prepare workspace/i.test(txt) || /Copied source from/i.test(txt)) return 15
+    return status.status === 'running' ? 10 : 5
+  }
+
+  const percent = status.status === 'success' ? 100 : status.status === 'failed' ? 100 : progressFromLogs()
 
   async function onCancel() {
     if (!buildId) return

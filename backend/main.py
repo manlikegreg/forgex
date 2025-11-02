@@ -19,7 +19,13 @@ from backend.services.logger import log_manager
 # Configure logging
 _LOG_LEVEL = os.getenv("FORGEX_LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=getattr(logging, _LOG_LEVEL, logging.INFO), format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
-for _name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+# Reduce access logs unless explicitly enabled
+_access_logger = logging.getLogger("uvicorn.access")
+if os.getenv("FORGEX_ACCESS_LOG", "0") in {"1", "true", "TRUE", "yes"}:
+    _access_logger.setLevel(getattr(logging, _LOG_LEVEL, logging.INFO))
+else:
+    _access_logger.setLevel(logging.WARNING)
+for _name in ("uvicorn", "uvicorn.error"):
     logging.getLogger(_name).setLevel(getattr(logging, _LOG_LEVEL, logging.INFO))
 logger = logging.getLogger("forgex")
 
@@ -38,10 +44,20 @@ app.add_middleware(
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     start = time.time()
+    minimal_http = os.getenv("FORGEX_HTTP_LOG", "minimal").lower() != "verbose"
     try:
         response = await call_next(request)
-        dur_ms = (time.time() - start) * 1000
-        logging.getLogger("forgex.http").info(f"{request.method} {request.url.path} -> {response.status_code} q={dict(request.query_params)} took={dur_ms:.1f}ms")
+        if minimal_http:
+            # Skip very chatty endpoints and only log slow or error responses
+            p = request.url.path or ""
+            if p.startswith("/build-status") or p.startswith("/ws/"):
+                return response
+            dur_ms = (time.time() - start) * 1000
+            if response.status_code >= 400 or dur_ms >= 500:
+                logging.getLogger("forgex.http").info(f"{request.method} {p} -> {response.status_code} took={dur_ms:.1f}ms")
+        else:
+            dur_ms = (time.time() - start) * 1000
+            logging.getLogger("forgex.http").info(f"{request.method} {request.url.path} -> {response.status_code} q={dict(request.query_params)} took={dur_ms:.1f}ms")
         return response
     except Exception as e:
         logging.getLogger("forgex.http").exception(f"Unhandled error for {request.method} {request.url.path}: {e}")

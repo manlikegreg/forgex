@@ -36,6 +36,36 @@ Demonstration (Python Flask)
 - Configure uses suggested command python app.py
 - Start build -> venv + pip install + pyinstaller --onefile -> artifact appears under build/<project>/<build_id>/
 
+Start command examples and working directory
+- Working directory controls where the command runs relative to your project.
+- If your entry is in a subfolder (e.g., test/main.py), set either:
+  - Working directory = . and Start command = uvicorn test.main:app --host 127.0.0.1 --port 8000
+  - OR Working directory = test and Start command = uvicorn main:app --host 127.0.0.1 --port 8000
+- Use 127.0.0.1 or 0.0.0.0 as host (127.0.0 is invalid).
+- For plain scripts, use python path/to/script.py
+
+Running multiple processes (frontend + backend)
+- PyInstaller bundles one executable; to start multiple processes, create a small launcher script that spawns both and waits. Example launcher.py:
+
+  ```python
+  import subprocess, sys, os
+  procs = []
+  try:
+      # Adjust commands/paths as needed; use absolute or project-relative paths
+      procs.append(subprocess.Popen([sys.executable, "backend_app.py"], cwd=os.getcwd()))
+      procs.append(subprocess.Popen([sys.executable, "frontend_dev.py"], cwd=os.getcwd()))
+      # Wait until one exits; Ctrl+C closes both when running the built EXE in a console
+      exit_codes = [p.wait() for p in procs]
+      sys.exit(max(exit_codes) if exit_codes else 0)
+  finally:
+      for p in procs:
+          try: p.terminate()
+          except: pass
+  ```
+
+- Set Start command = python launcher.py (and include launcher.py in your project). This works cross‑platform and lets ForgeX package the orchestrator.
+- Alternatively on Windows, a .bat can start multiple programs, but the Python launcher is the most portable.
+
 Security & Sandboxing
 - Builds run in a temp workspace ~/.forgex/tmp
 - Python builds use a venv (.venv) for dependency isolation
