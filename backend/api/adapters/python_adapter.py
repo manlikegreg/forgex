@@ -623,14 +623,35 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                     "try { Unblock-File -Path $exe -ErrorAction SilentlyContinue } catch {}\n"
                     "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force\n"
                     "$wd = Split-Path -Path $exe -Parent\n"
-                    "Start-Process -FilePath $exe -WorkingDirectory $wd\n"
+                    "$p = Start-Process -FilePath $exe -WorkingDirectory $wd -PassThru -Wait\n"
+                    "$code = 0\n"
+                    "try { $code = $p.ExitCode } catch { $code = 0 }\n"
+                    "exit $code\n"
                 )
+                # Base CMD wrapper: run PS1, capture exit, delay on error so users can read it
                 cmd_code = (
                     "@echo off\r\n"
                     "setlocal\r\n"
                     "set SCRIPT=%~dp0%~n0.ps1\r\n"
                     "powershell -NoProfile -ExecutionPolicy Bypass -File \"%SCRIPT%\"\r\n"
+                    "set RC=%ERRORLEVEL%\r\n"
+                    "if not \"%RC%\"==\"0\" (\r\n"
+                    "  echo Error launching app (code %RC%).\r\n"
+                    "  timeout /t 8 /nobreak >nul\r\n"
+                    ")\r\n"
                 )
+                # Optional extra delay if pause_on_exit configured
+                try:
+                    if getattr(request, 'pause_on_exit', False):
+                        secs = getattr(request, 'pause_on_exit_seconds', None)
+                        try:
+                            secs = int(secs) if secs is not None else 5
+                        except Exception:
+                            secs = 5
+                        secs = max(1, min(120, secs))
+                        cmd_code += f"timeout /t {secs} /nobreak >nul\r\n"
+                except Exception:
+                    pass
                 try:
                     ps1.write_text(ps_code, encoding='utf-8')
                     cmd.write_text(cmd_code, encoding='utf-8')
