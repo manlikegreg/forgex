@@ -107,7 +107,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         if code != 0:
             return []
     # Ensure pyinstaller available
-    await log_cb("debug", "Ensuring pyinstaller is installed")
+    await log_cb("info", "Installing PyInstaller (this may take a few minutes)...")
     code = await _run_and_stream([str(pip_bin), "install", "pyinstaller"], env, workdir, log_cb, timeout_seconds, cancel_event)
     if code != 0:
         return []
@@ -338,7 +338,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
             if auto_pkgs:
                 # de-duplicate
                 pkgs = sorted(set(auto_pkgs))
-                await log_cb('info', f"Auto-installing detected packages: {', '.join(pkgs)}")
+                await log_cb('info', f"Installing runtime packages: {', '.join(pkgs)} (this may take a while)...")
                 code = await _run_and_stream([str(pip_bin), 'install', *pkgs], env, workdir, log_cb, timeout_seconds, cancel_event)
                 if code != 0:
                     await log_cb('warn', 'Auto-install of detected packages failed; continuing')
@@ -536,6 +536,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
 
     build_cmd += [entry_for_build]
     await log_cb("debug", f"PyInstaller cmd: {' '.join(shlex.quote(x) for x in build_cmd)}")
+    await log_cb("info", "Running PyInstaller... (first run can be slow)")
 
     code = await _run_and_stream(build_cmd, env, workdir, log_cb, timeout_seconds, cancel_event)
     if code != 0:
