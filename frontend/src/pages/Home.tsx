@@ -20,6 +20,7 @@ export default function Home() {
   const [pauseSeconds, setPauseSeconds] = useState<number>(5)
   const [winAutoStart, setWinAutoStart] = useState(false)
   const [autostartMethod, setAutostartMethod] = useState<'task'|'startup'>('task')
+  const [winSmartHelper, setWinSmartHelper] = useState(false)
   const [signEnable, setSignEnable] = useState(false)
   const [signCert, setSignCert] = useState('')
   const [signPwd, setSignPwd] = useState('')
@@ -31,6 +32,7 @@ export default function Home() {
   const [showAdvanced, setShowAdvanced] = useState(false)
   // PyInstaller simple options
   const [pyiNoConsole, setPyiNoConsole] = useState(false)
+  const [maskRuntimeLogs, setMaskRuntimeLogs] = useState(false)
   const [pyiHiddenImports, setPyiHiddenImports] = useState('')
   const [pyiPaths, setPyiPaths] = useState('')
   const [pyiAddData, setPyiAddData] = useState('')
@@ -95,11 +97,13 @@ export default function Home() {
       icon_path: iconPath || null,
       extra_files: [],
       pyinstaller: Object.keys(pyi).length? pyi : undefined,
+      privacy_mask_logs: maskRuntimeLogs || undefined,
       pause_on_exit: pauseOnExit,
       pause_on_exit_seconds: pauseOnExit ? pauseSeconds : undefined,
       win_autostart: winAutoStart || undefined,
       autostart_method: winAutoStart ? autostartMethod : undefined,
       code_sign: signEnable ? { enable: true, cert_path: signCert, cert_password: signPwd || undefined, timestamp_url: signTS || undefined } : undefined,
+      win_smartscreen_helper: winSmartHelper || undefined,
       verbose,
     } as any
     const res = await startBuild(req)
@@ -318,6 +322,11 @@ export default function Home() {
               <input id="verbose" type="checkbox" checked={verbose} onChange={e=>setVerbose(e.target.checked)} />
               <label htmlFor="verbose" title="Include debug logs from the backend build process">Verbose logs</label>
             </div>
+            <div className="mt-3 flex items-center gap-3">
+              <input id="mask_logs" type="checkbox" checked={maskRuntimeLogs} onChange={e=>setMaskRuntimeLogs(e.target.checked)} />
+              <label htmlFor="mask_logs" title="Mask runtime log messages inside the packaged app (privacy)">Mask runtime logs (privacy)</label>
+              {!pyiNoConsole && <span className="text-[11px] text-gray-500">Works best with --noconsole</span>}
+            </div>
             {outputType === 'exe' && (
               <>
                 <div className="mt-3 flex items-center gap-3">
@@ -329,6 +338,10 @@ export default function Home() {
                       <option value="startup">Startup Folder</option>
                     </select>
                   )}
+                </div>
+                <div className="mt-3 flex items-center gap-3">
+                  <input id="win_helper" type="checkbox" checked={winSmartHelper} onChange={e=>setWinSmartHelper(e.target.checked)} />
+                  <label htmlFor="win_helper" title="Generate a helper script (PowerShell) to launch the app. Not a guarantee to bypass SmartScreen.">Windows SmartScreen helper script</label>
                 </div>
                 <div className="mt-3 border border-gray-800 rounded p-3">
                   <div className="flex items-center gap-3">

@@ -36,8 +36,11 @@ export type BuildRequest = {
   win_autostart?: boolean
   autostart_method?: 'task'|'startup'
   code_sign?: CodeSign
+  // Generate a helper script for Windows to launch the app via PowerShell
+  win_smartscreen_helper?: boolean
   target_os?: 'windows'|'linux'|'macos'
   verbose?: boolean
+  privacy_mask_logs?: boolean
 }
 
 export type BuildStatus = {

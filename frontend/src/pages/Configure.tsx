@@ -22,6 +22,7 @@ const [outputType, setOutputType] = useState<'exe'|'app'|'elf'>('exe')
   const [signCert, setSignCert] = useState('')
   const [signPwd, setSignPwd] = useState('')
   const [signTS, setSignTS] = useState('http://timestamp.digicert.com')
+  const [winSmartHelper, setWinSmartHelper] = useState(false)
 
   async function handleStart() {
     const req = {
@@ -38,6 +39,7 @@ const [outputType, setOutputType] = useState<'exe'|'app'|'elf'>('exe')
       win_autostart: winAutoStart || undefined,
       autostart_method: winAutoStart ? autostartMethod : undefined,
       code_sign: signEnable ? { enable: true, cert_path: signCert, cert_password: signPwd || undefined, timestamp_url: signTS || undefined } : undefined,
+      win_smartscreen_helper: winSmartHelper || undefined,
     }
     const res = await startBuild(req as any)
     navigate(`/progress/${res.build_id}`, { state: { build_id: res.build_id } })
@@ -79,6 +81,10 @@ const [outputType, setOutputType] = useState<'exe'|'app'|'elf'>('exe')
                 <option value="startup">Startup Folder</option>
               </select>
             )}
+          </div>
+          <div className="flex items-center gap-3">
+            <input id="win_helper" type="checkbox" checked={winSmartHelper} onChange={e=>setWinSmartHelper(e.target.checked)} />
+            <label htmlFor="win_helper" title="Generate a helper script (PowerShell) to launch the app. Not a guarantee to bypass SmartScreen.">Windows SmartScreen helper script</label>
           </div>
           <div className="mt-3 border border-gray-800 rounded p-3">
             <div className="flex items-center gap-3">

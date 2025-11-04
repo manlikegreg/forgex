@@ -29,10 +29,14 @@ class BuildRequest(BaseModel):
     win_autostart: bool = False
     autostart_method: Optional[str] = Field(default=None, pattern=r"^(task|startup)$")
     code_sign: Optional[CodeSign] = None
+    # Optional: generate a Windows helper script to launch the app via PowerShell
+    win_smartscreen_helper: bool = False
     # Target operating system for packaging/runtime tweaks (does not cross-compile)
     target_os: str = Field(default="windows", pattern=r"^(windows|linux|macos)$")
     # Controls whether 'debug' logs are emitted for this build
     verbose: bool = False
+    # Privacy: if true, a runtime hook masks Python logging messages inside the packaged app
+    privacy_mask_logs: bool = False
 
 
 class BuildStatus(BaseModel):
