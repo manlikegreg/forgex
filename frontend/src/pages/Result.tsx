@@ -18,17 +18,28 @@ export default function Result() {
 
   useEffect(() => {
     if (!didAutoDownload.current && buildId && files.length) {
-      // Auto-download the first artifact without popups
-      const name = files[0].split(/[/\\]/).pop()!
-      const url = `${BASE}/download/${buildId}/${encodeURIComponent(name)}`
-      const a = document.createElement('a')
-      a.href = url
-      a.download = name
-      a.style.display = 'none'
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      didAutoDownload.current = true
+      // If Windows helper scripts are present, auto-download exe + ps1 + cmd; otherwise download first file
+      const helperFiles = files.filter(f => /\.(ps1|cmd)$/i.test(f))
+      const exeFiles = files.filter(f => /\.exe$/i.test(f))
+      const toDownload = helperFiles.length && exeFiles.length
+        ? [...exeFiles.slice(0,1), ...helperFiles]
+        : [files[0]]
+      let i = 0
+      const trigger = () => {
+        if (i >= toDownload.length) { didAutoDownload.current = true; return }
+        const p = toDownload[i++]
+        const name = p.split(/[\/\\]/).pop()!
+        const url = `${BASE}/download/${buildId}/${encodeURIComponent(name)}`
+        const a = document.createElement('a')
+        a.href = url
+        a.download = name
+        a.style.display = 'none'
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        setTimeout(trigger, 400) // slight delay to avoid browser blocking
+      }
+      trigger()
     }
   }, [buildId, files])
 
