@@ -38,6 +38,9 @@ export type BuildRequest = {
   code_sign?: CodeSign
   // Generate a helper script for Windows to launch the app via PowerShell
   win_smartscreen_helper?: boolean
+  // If helper generated, log output to file via CMD; optional custom log filename
+  win_helper_log?: boolean
+  win_helper_log_name?: string
   target_os?: 'windows'|'linux'|'macos'
   verbose?: boolean
   privacy_mask_logs?: boolean

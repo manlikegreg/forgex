@@ -31,6 +31,9 @@ class BuildRequest(BaseModel):
     code_sign: Optional[CodeSign] = None
     # Optional: generate a Windows helper script to launch the app via PowerShell
     win_smartscreen_helper: bool = False
+    # Optional: if helper is generated, log output to a file via CMD redirection
+    win_helper_log: bool = False
+    win_helper_log_name: Optional[str] = None
     # Target operating system for packaging/runtime tweaks (does not cross-compile)
     target_os: str = Field(default="windows", pattern=r"^(windows|linux|macos)$")
     # Controls whether 'debug' logs are emitted for this build

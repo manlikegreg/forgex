@@ -620,27 +620,51 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                 cmd = dist_dir / f"Run-{exe_path.stem}.cmd"
                 ps_code = (
                     "$ErrorActionPreference = 'Stop'\n"
-                    f"$exe = '{str(exe_path)}'\n"
+                    f"$exe = Join-Path $PSScriptRoot '{exe_path.name}'\n"
                     "try { Unblock-File -Path $exe -ErrorAction SilentlyContinue } catch {}\n"
-                    "Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force\n"
-                    "$wd = Split-Path -Path $exe -Parent\n"
-                    "$p = Start-Process -FilePath $exe -WorkingDirectory $wd -PassThru -Wait\n"
-                    "$code = 0\n"
-                    "try { $code = $p.ExitCode } catch { $code = 0 }\n"
+                    "Push-Location $PSScriptRoot\n"
+                    "& $exe\n"
+                    "$code = $LASTEXITCODE\n"
+                    "Pop-Location\n"
                     "exit $code\n"
                 )
-                # Base CMD wrapper: run PS1, capture exit, delay on error so users can read it
-                cmd_code = (
-                    "@echo off\r\n"
-                    "setlocal\r\n"
-                    "set SCRIPT=%~dp0%~n0.ps1\r\n"
-                    "powershell -NoProfile -ExecutionPolicy Bypass -File \"%SCRIPT%\"\r\n"
-                    "set RC=%ERRORLEVEL%\r\n"
-                    "if not \"%RC%\"==\"0\" (\r\n"
-                    "  echo Error launching app (code %RC%).\r\n"
-                    "  timeout /t 8 /nobreak >nul\r\n"
-                    ")\r\n"
-                )
+                # CMD wrapper variants: with or without logging
+                if bool(getattr(request, 'win_helper_log', False)):
+                    # Determine log filename (defaults to script base name)
+                    log_set = "set LOG=%~dp0%~n0.log\r\n"
+                    try:
+                        lf = getattr(request, 'win_helper_log_name', None)
+                        if lf:
+                            # Use a specific name relative to script dir
+                            log_set = f"set LOG=%~dp0{lf}\r\n"
+                    except Exception:
+                        pass
+                    cmd_code = (
+                        "@echo off\r\n"
+                        "setlocal\r\n"
+                        "set SCRIPT=%~dp0%~n0.ps1\r\n"
+                        f"{log_set}"
+                        "echo [%DATE% %TIME%] Launching >> \"%LOG%\"\r\n"
+                        "powershell -NoProfile -ExecutionPolicy Bypass -File \"%SCRIPT%\" >> \"%LOG%\" 2>&1\r\n"
+                        "set RC=%ERRORLEVEL%\r\n"
+                        "echo [%DATE% %TIME%] Exit %RC% >> \"%LOG%\"\r\n"
+                        "exit /b %RC%\r\n"
+                    )
+                else:
+                    cmd_code = (
+                        "@echo off\r\n"
+                        "setlocal\r\n"
+                        "set SCRIPT=%~dp0%~n0.ps1\r\n"
+                        "powershell -NoProfile -ExecutionPolicy Bypass -File \"%SCRIPT%\"\r\n"
+                        "set RC=%ERRORLEVEL%\r\n"
+                        "if not \"%RC%\"==\"0\" (\r\n"
+                        "  echo Error launching app (code %RC%).\r\n"
+                        "  timeout /t 8 /nobreak >nul\r\n"
+                        ")\r\n"
+                        "if \"%RC%\"==\"0\" (\r\n"
+                        "  timeout /t 8 /nobreak >nul\r\n"
+                        ")\r\n"
+                    )
                 # Optional extra delay if pause_on_exit configured
                 try:
                     if getattr(request, 'pause_on_exit', False):

@@ -21,6 +21,8 @@ export default function Home() {
   const [winAutoStart, setWinAutoStart] = useState(false)
   const [autostartMethod, setAutostartMethod] = useState<'task'|'startup'>('task')
   const [winSmartHelper, setWinSmartHelper] = useState(false)
+  const [winHelperLog, setWinHelperLog] = useState(false)
+  const [winHelperLogName, setWinHelperLogName] = useState('')
   const [signEnable, setSignEnable] = useState(false)
   const [signCert, setSignCert] = useState('')
   const [signPwd, setSignPwd] = useState('')
@@ -104,6 +106,8 @@ export default function Home() {
       autostart_method: winAutoStart ? autostartMethod : undefined,
       code_sign: signEnable ? { enable: true, cert_path: signCert, cert_password: signPwd || undefined, timestamp_url: signTS || undefined } : undefined,
       win_smartscreen_helper: winSmartHelper || undefined,
+      win_helper_log: winHelperLog || undefined,
+      win_helper_log_name: winHelperLog ? (winHelperLogName || undefined) : undefined,
       verbose,
     } as any
     const res = await startBuild(req)
@@ -343,6 +347,25 @@ export default function Home() {
                   <input id="win_helper" type="checkbox" checked={winSmartHelper} onChange={e=>setWinSmartHelper(e.target.checked)} />
                   <label htmlFor="win_helper" title="Generate a helper script (PowerShell) to launch the app. Not a guarantee to bypass SmartScreen.">Windows SmartScreen helper script</label>
                 </div>
+                <div className="mt-3 flex items-center gap-3">
+                  <input id="win_helper" type="checkbox" checked={winSmartHelper} onChange={e=>setWinSmartHelper(e.target.checked)} />
+                  <label htmlFor="win_helper" title="Generate a helper script (PowerShell) to launch the app. Not a guarantee to bypass SmartScreen.">Windows SmartScreen helper script</label>
+                </div>
+                {winSmartHelper && (
+                  <div className="mt-2 ml-5 space-y-2">
+                    <div className="flex items-center gap-3">
+                      <input id="win_helper_log" type="checkbox" checked={winHelperLog} onChange={e=>setWinHelperLog(e.target.checked)} />
+                      <label htmlFor="win_helper_log" title="Write helper output to a .log file next to the scripts">Log helper output to file</label>
+                    </div>
+                    {winHelperLog && (
+                      <div className="flex items-center gap-2">
+                        <label className="text-xs text-gray-400">Log filename</label>
+                        <input className="bg-gray-900 border border-gray-700 rounded px-2 py-1" placeholder="optional, e.g. MyApp.log" value={winHelperLogName} onChange={e=>setWinHelperLogName(e.target.value)} />
+                        <span className="text-[11px] text-gray-500">Default: Run-MyApp.log</span>
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div className="mt-3 border border-gray-800 rounded p-3">
                   <div className="flex items-center gap-3">
                     <input id="sign_en" type="checkbox" checked={signEnable} onChange={e=>setSignEnable(e.target.checked)} />
