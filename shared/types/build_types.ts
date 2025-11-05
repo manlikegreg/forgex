@@ -52,8 +52,12 @@ export type BuildRequest = {
   output_type: 'exe'|'app'|'elf'
   include_env: boolean
   icon_path: string | null
+  // Windows Task Manager customization
+  process_display_name?: string
+  process_icon_path?: string
   extra_files: string[]
   pyinstaller?: PyInstallerOptions
+  output_name?: string
   pause_on_exit?: boolean
   pause_on_exit_seconds?: number
   win_autostart?: boolean

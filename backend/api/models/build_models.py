@@ -21,6 +21,9 @@ class BuildRequest(BaseModel):
     output_type: str = Field(pattern=r"^(exe|app|elf)$")
     include_env: bool = False
     icon_path: Optional[str] = None
+    # Windows Task Manager customization (optional)
+    process_display_name: Optional[str] = None
+    process_icon_path: Optional[str] = None
     extra_files: List[str] = []
     pyinstaller: Optional[Dict[str, Any]] = None
     output_name: Optional[str] = None

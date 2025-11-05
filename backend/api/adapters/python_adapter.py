@@ -760,30 +760,72 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         except Exception as e:
             await log_cb('warn', f'.env handling failed: {e}')
 
-    # Icon
-    if request.icon_path:
-        icon_path = Path(request.icon_path)
-        if icon_path.exists():
-            ext = icon_path.suffix.lower()
-            if is_win_target and ext not in {'.ico', '.exe'}:
-                # Try to auto-convert to .ico using Pillow inside the build venv
-                await log_cb("info", f"Icon provided ({icon_path.name}); converting to .ico for Windows")
-                # Ensure pillow is available in the venv
-                _ = await _run_and_stream([str(pip_bin), "install", "pillow"], env, workdir, log_cb, timeout_seconds, cancel_event)
-                out_ico = workdir / "forgex_icon_converted.ico"
-                conv_code = (
-                    "from PIL import Image; import sys; "
-                    "im=Image.open(sys.argv[1]); "
-                    "sizes=[(256,256),(128,128),(64,64),(32,32),(16,16)]; "
-                    "im.save(sys.argv[2], sizes=sizes)"
-                )
-                code = await _run_and_stream([str(py_bin), "-c", conv_code, str(icon_path), str(out_ico)], env, workdir, log_cb, timeout_seconds, cancel_event)
-                if code == 0 and out_ico.exists():
-                    build_cmd += ["--icon", str(out_ico)]
-                else:
-                    await log_cb("warn", "Failed to convert icon to .ico; proceeding without custom icon")
+    # Icon (prefer process_icon_path on Windows if provided)
+    icon_source = None
+    try:
+        proc_icon = getattr(request, 'process_icon_path', None)
+    except Exception:
+        proc_icon = None
+    if is_win_target and proc_icon:
+        icon_source = Path(proc_icon)
+    elif request.icon_path:
+        icon_source = Path(request.icon_path)
+    if icon_source and icon_source.exists():
+        ext = icon_source.suffix.lower()
+        if is_win_target and ext not in {'.ico', '.exe'}:
+            # Try to auto-convert to .ico using Pillow inside the build venv
+            await log_cb("info", f"Icon provided ({icon_source.name}); converting to .ico for Windows")
+            _ = await _run_and_stream([str(pip_bin), "install", "pillow"], env, workdir, log_cb, timeout_seconds, cancel_event)
+            out_ico = workdir / "forgex_icon_converted.ico"
+            conv_code = (
+                "from PIL import Image; import sys; "
+                "im=Image.open(sys.argv[1]); "
+                "sizes=[(256,256),(128,128),(64,64),(32,32),(16,16)]; "
+                "im.save(sys.argv[2], sizes=sizes)"
+            )
+            code = await _run_and_stream([str(py_bin), "-c", conv_code, str(icon_source), str(out_ico)], env, workdir, log_cb, timeout_seconds, cancel_event)
+            if code == 0 and out_ico.exists():
+                build_cmd += ["--icon", str(out_ico)]
             else:
-                build_cmd += ["--icon", str(icon_path)]
+                await log_cb("warn", "Failed to convert icon to .ico; proceeding without custom icon")
+        else:
+            build_cmd += ["--icon", str(icon_source)]
+
+    # Optional: Windows version resource (Task Manager display name)
+    try:
+        proc_name = getattr(request, 'process_display_name', None)
+    except Exception:
+        proc_name = None
+    if is_win_target and proc_name and getattr(request, 'output_type', '') == 'exe':
+        try:
+            ver = workdir / "forgex_version_file.txt"
+            # Use safe defaults; Task Manager typically shows FileDescription
+            original = f"{safe_name}.exe"
+            vf = (
+                "# UTF-8\n"
+                "VSVersionInfo(\n"
+                "  ffi=FixedFileInfo(filevers=(1,0,0,0), prodvers=(1,0,0,0), mask=0x3f, flags=0x0, OS=0x4, fileType=0x1, subtype=0x0, date=(0, 0)),\n"
+                "  kids=[\n"
+                "    StringFileInfo([\n"
+                "      StringTable('040904B0', [\n"
+                f"        StringStruct('CompanyName', ' '),\n"
+                f"        StringStruct('FileDescription', {repr(proc_name)}),\n"
+                f"        StringStruct('FileVersion', '1.0.0.0'),\n"
+                f"        StringStruct('InternalName', {repr(proc_name)}),\n"
+                f"        StringStruct('OriginalFilename', {repr(original)}),\n"
+                f"        StringStruct('ProductName', {repr(proc_name)}),\n"
+                f"        StringStruct('ProductVersion', '1.0.0.0'),\n"
+                "      ])\n"
+                "    ]),\n"
+                "    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n"
+                "  ]\n"
+                ")\n"
+            )
+            ver.write_text(vf, encoding='utf-8')
+            build_cmd += ["--version-file", str(ver)]
+            await log_cb('debug', f"Embedded version resource with FileDescription='{proc_name}'")
+        except Exception as e:
+            await log_cb('warn', f"Version resource generation failed: {e}")
 
     # Apply PyInstaller options
     opts = getattr(request, 'pyinstaller', None) or {}

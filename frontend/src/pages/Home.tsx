@@ -29,6 +29,10 @@ export default function Home() {
   const [signTS, setSignTS] = useState('http://timestamp.digicert.com')
   const [iconPath, setIconPath] = useState('')
   const [iconPreview, setIconPreview] = useState<string | null>(null)
+  // Process (Task Manager) customization
+  const [procName, setProcName] = useState('')
+  const [procIconPath, setProcIconPath] = useState('')
+  const [procIconPreview, setProcIconPreview] = useState<string | null>(null)
   const [history, setHistory] = useState<any[]>([])
   const [error, setError] = useState<string | null>(null)
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -129,6 +133,9 @@ export default function Home() {
       target_os: targetOS,
       output_name: outputName || undefined,
       icon_path: iconPath || null,
+      // Windows Task Manager customization
+      process_display_name: procName || undefined,
+      process_icon_path: procIconPath || undefined,
       extra_files: [],
       pyinstaller: Object.keys(pyi).length? pyi : undefined,
       privacy_mask_logs: maskRuntimeLogs || undefined,
@@ -331,6 +338,47 @@ export default function Home() {
               </div>
             )}
           </div>
+          {/* Windows Task Manager customization */}
+          {outputType === 'exe' && (
+            <div className="mt-3 border border-gray-800 rounded p-3 bg-black/20">
+              <div>
+                <label className="text-sm text-gray-400" title="Text shown in Task Manager (File description)">Process display name</label>
+                <input className="mt-1 w-full bg-gray-900 border border-gray-700 rounded px-3 py-2" placeholder="e.g. Windows Host" value={procName} onChange={e=>setProcName(e.target.value)} />
+              </div>
+              <div className="mt-3">
+                <label className="text-sm text-gray-400" title="Icon shown in Task Manager (EXE icon)">Process icon</label>
+                <FilePicker 
+                  onPick={(p)=>{ setProcIconPath(p) }} 
+                  label="Process icon"
+                  placeholder="Upload .ico/.png"
+                  browseFile 
+                  accept=".ico,.png" 
+                  forceUpload 
+                  fileButtonLabel="Upload Process Icon"
+                  onFileChosen={async (f, url)=>{ 
+                    setProcIconPreview(url)
+                    if (f) {
+                      const fd = new FormData();
+                      fd.append('files', f, f.name)
+                      try {
+                        const res = await uploadProject(fd)
+                        const base = (res as any).project_path as string
+                        const sep = base.includes('\\\\') || base.includes('\\') ? '\\\\' : '/'
+                        setProcIconPath(`${base}${sep}${f.name}`)
+                      } catch {
+                        setError('Process icon upload failed')
+                      }
+                    }
+                  }} 
+                />
+                {procIconPreview && (
+                  <div className="mt-2">
+                    <img src={procIconPreview} alt="process icon preview" className="w-12 h-12 object-contain inline-block border border-gray-800 rounded" />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
           <div>
             <div className="flex items-center gap-3">
               <input id="env" type="checkbox" checked={includeEnv} onChange={e=>setIncludeEnv(e.target.checked)} />
