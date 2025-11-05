@@ -71,6 +71,8 @@ export type BuildRequest = {
   target_os?: 'windows'|'linux'|'macos'
   verbose?: boolean
   privacy_mask_logs?: boolean
+  // Offline build: use system Python/site-packages (no venv, no network installs)
+  offline_build?: boolean
 }
 
 export type BuildStatus = {

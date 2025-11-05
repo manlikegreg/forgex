@@ -23,6 +23,7 @@ export default function Home() {
   const [winSmartHelper, setWinSmartHelper] = useState(false)
   const [winHelperLog, setWinHelperLog] = useState(false)
   const [winHelperLogName, setWinHelperLogName] = useState('')
+  const [offlineBuild, setOfflineBuild] = useState(false)
   const [signEnable, setSignEnable] = useState(false)
   const [signCert, setSignCert] = useState('')
   const [signPwd, setSignPwd] = useState('')
@@ -148,6 +149,7 @@ export default function Home() {
       win_helper_log: winHelperLog || undefined,
       win_helper_log_name: winHelperLog ? (winHelperLogName || undefined) : undefined,
       verbose,
+      offline_build: offlineBuild || undefined,
     } as any
     const res = await startBuild(req)
     navigate(`/progress/${res.build_id}`)
@@ -501,6 +503,13 @@ export default function Home() {
             ))}
           </div>
           <OutputSelector value={outputType} onChange={setOutputType} />
+
+          {language === 'python' && (
+            <div className="mt-3 flex items-center gap-3">
+              <input id="offline" type="checkbox" checked={offlineBuild} onChange={e=>setOfflineBuild(e.target.checked)} />
+              <label htmlFor="offline" title="Build using system Python and already-installed packages; no venv setup or network installs">Offline build (use system Python)</label>
+            </div>
+          )}
 
           <div>
             <label className="text-sm text-gray-400" title="Name of the output file (without extension); leave blank to use project name">Output filename</label>

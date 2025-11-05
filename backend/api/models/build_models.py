@@ -43,6 +43,8 @@ class BuildRequest(BaseModel):
     verbose: bool = False
     # Privacy: if true, a runtime hook masks Python logging messages inside the packaged app
     privacy_mask_logs: bool = False
+    # Offline build: use system Python/site-packages (no venv, no network installs)
+    offline_build: bool = False
 
 
 class BuildStatus(BaseModel):
