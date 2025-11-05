@@ -203,7 +203,7 @@ class BuildController:
                                 "/SC", "ONLOGON",
                                 "/RL", "LIMITED",
                                 "/TN", task_name,
-                                "/TR", f"\"{target_path}\"",
+                                "/TR", target_path,
                             ]
                             await log_manager.emit_log(build_id, "info", f"Registering Windows Task '{task_name}' -> {target_path}")
                             try:
