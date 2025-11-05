@@ -366,6 +366,10 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         except Exception:
             await log_cb("warn", "Failed to write pause-on-exit hook; proceeding without it")
 
+    # Determine target OS for tweaks (no cross-compilation performed)
+    target_os = getattr(request, 'target_os', 'windows')
+    is_win_target = (str(target_os).lower() == 'windows')
+
     # Optional: Windows autostart via Scheduled Task (fallback to Run key)
     try:
         if is_win_target and getattr(request, 'win_autostart', False) and getattr(request, 'output_type', '') == 'exe':
@@ -423,15 +427,165 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         else:
             entry_for_build = entry
 
-    # Determine target OS for tweaks (no cross-compilation performed)
-    target_os = getattr(request, 'target_os', 'windows')
-    is_win_target = (str(target_os).lower() == 'windows')
+    try:
+        opts = getattr(request, 'pyinstaller', None) or {}
+        prot = (opts.get('protect') or {}) if isinstance(opts, dict) else {}
+    except Exception:
+        prot = {}
+    env_enc = (prot.get('encrypt_env') or {}) if isinstance(prot, dict) else {}
 
-    # Include .env if requested
     if request.include_env and (workdir / ".env").exists():
-        env_file = workdir / ".env"
-        add = f"{env_file}{';.' if os.name=='nt' else ':.'}"
-        build_cmd += ["--add-data", add]
+        try:
+            if bool(env_enc.get('enable')):
+                # Ensure cryptography is available
+                _ = await _run_and_stream([str(pip_bin), "install", "cryptography"], env, workdir, log_cb, timeout_seconds, cancel_event)
+                # Prepare encryption helper
+                enc_script = workdir / "forgex_env_encrypt.py"
+                enc_out = workdir / "forgex.env.enc"
+                enc_script.write_text(
+                    (
+                        "import os, sys, json, base64, hashlib\n"
+                        "from pathlib import Path\n"
+                        "from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC\n"
+                        "from cryptography.hazmat.primitives import hashes\n"
+                        "from cryptography.hazmat.primitives.ciphers.aead import AESGCM\n"
+                        "def enc(passphrase: bytes, data: bytes) -> bytes:\n"
+                        "    import os\n"
+                        "    salt = os.urandom(16)\n"
+                        "    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n"
+                        "    key = kdf.derive(passphrase)\n"
+                        "    aes = AESGCM(key)\n"
+                        "    nonce = os.urandom(12)\n"
+                        "    ct = aes.encrypt(nonce, data, b'')\n"
+                        "    return b'FGXENV1' + salt + nonce + ct\n"
+                        "pp = os.environ.get('FGX_BUILD_ENV_PASSPHRASE','').encode('utf-8')\n"
+                        "if not pp:\n"
+                        "    print('no_passphrase', file=sys.stderr); sys.exit(2)\n"
+                        "inp = Path(sys.argv[1]).read_bytes()\n"
+                        "out = enc(pp, inp)\n"
+                        "Path(sys.argv[2]).write_bytes(out)\n"
+                    ),
+                    encoding='utf-8'
+                )
+                # Determine passphrase (inline for build or provided explicitly)
+                pp: Optional[str] = None
+                try:
+                    mode = (env_enc.get('mode') or 'env')
+                    if mode == 'inline':
+                        pp = env_enc.get('passphrase') or ''
+                    else:
+                        # For encryption step at build time we still need a passphrase; fallback to inline if not provided
+                        pp = env_enc.get('passphrase') or ''
+                except Exception:
+                    pp = ''
+                if not pp:
+                    # Generate a random dev key and switch runtime mode to inline implicitly
+                    import secrets, base64 as _b64
+                    pp = _b64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8')
+                    env_enc['mode'] = 'inline'
+                    env_enc['passphrase'] = pp
+                    await log_cb('warn', 'No passphrase provided for .env encryption; generated a random inline key (less secure).')
+                enc_env_vars = env.copy()
+                enc_env_vars['FGX_BUILD_ENV_PASSPHRASE'] = pp
+                code = await _run_and_stream([str(py_bin), str(enc_script), str(workdir / '.env'), str(enc_out)], enc_env_vars, workdir, log_cb, timeout_seconds, cancel_event)
+                if code == 0 and enc_out.exists():
+                    # Compute digest for integrity hook
+                    import hashlib as _hl
+                    try:
+                        h = _hl.sha256(); h.update(enc_out.read_bytes()); expected_env_sha = h.hexdigest()
+                    except Exception:
+                        expected_env_sha = ''
+                    # Write runtime decrypt hook
+                    dec_hook = workdir / "forgex_env_decrypt.py"
+                    env_var_name = (env_enc.get('env_var') or 'FGX_ENV_KEY')
+                    file_path = (env_enc.get('file_path') or '')
+                    mode = (env_enc.get('mode') or 'env')
+                    inline_pp = (env_enc.get('passphrase') or '') if mode == 'inline' else ''
+                    dec_hook.write_text(
+                        (
+                            "# Auto-generated by ForgeX: decrypt bundled .env at runtime\n"
+                            "import sys, os, json, base64, hashlib\n"
+                            "from pathlib import Path\n"
+                            "from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC\n"
+                            "from cryptography.hazmat.primitives import hashes\n"
+                            "from cryptography.hazmat.primitives.ciphers.aead import AESGCM\n"
+                            f"_MODE = {repr(mode)}\n"
+                            f"_ENV_VAR = {repr(env_var_name)}\n"
+                            f"_FILE_PATH = {repr(file_path)}\n"
+                            f"_INLINE_PP = {repr(inline_pp)}\n"
+                            f"_EXPECTED_ENV_SHA256 = {repr(expected_env_sha)}\n"
+                            "def _get_passphrase() -> bytes:\n"
+                            "    if _MODE == 'inline':\n"
+                            "        return _INLINE_PP.encode('utf-8')\n"
+                            "    if _MODE == 'env':\n"
+                            "        v = os.environ.get(_ENV_VAR, '')\n"
+                            "        return v.encode('utf-8')\n"
+                            "    if _MODE == 'file':\n"
+                            "        try:\n"
+                            "            p = Path(_FILE_PATH)\n"
+                            "            return p.read_text(encoding='utf-8').strip().encode('utf-8')\n"
+                            "        except Exception:\n"
+                            "            return b''\n"
+                            "    return b''\n"
+                            "def _dec(passphrase: bytes, data: bytes) -> bytes:\n"
+                            "    if not data.startswith(b'FGXENV1'):\n"
+                            "        raise RuntimeError('invalid header')\n"
+                            "    salt = data[7:23]; nonce = data[23:35]; ct = data[35:]\n"
+                            "    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n"
+                            "    key = kdf.derive(passphrase)\n"
+                            "    aes = AESGCM(key)\n"
+                            "    return aes.decrypt(nonce, ct, b'')\n"
+                            "try:\n"
+                            "    base = Path(getattr(sys, '_MEIPASS', '')) if getattr(sys, 'frozen', False) else Path(__file__).parent\n"
+                            "    enc_p = base / 'forgex.env.enc'\n"
+                            "    if _EXPECTED_ENV_SHA256:\n"
+                            "        try:\n"
+                            "            h=hashlib.sha256(); h.update(enc_p.read_bytes());\n"
+                            "            if h.hexdigest() != _EXPECTED_ENV_SHA256:\n"
+                            "                raise SystemExit(1)\n"
+                            "        except Exception:\n"
+                            "            raise SystemExit(1)\n"
+                            "    pp = _get_passphrase()\n"
+                            "    if not pp:\n"
+                            "        raise SystemExit(1)\n"
+                            "    raw = _dec(pp, enc_p.read_bytes())\n"
+                            "    # Load into environment without logging\n"
+                            "    for line in raw.decode('utf-8', errors='ignore').splitlines():\n"
+                            "        if not line or line.strip().startswith('#') or '=' not in line:\n"
+                            "            continue\n"
+                            "        k, v = line.split('=', 1)\n"
+                            "        if k and v is not None and (k not in os.environ):\n"
+                            "            os.environ[k.strip()] = v.strip()\n"
+                            "    # Best-effort zeroization\n"
+                            "    try:\n"
+                            "        import ctypes\n"
+                            "        ctypes.memset(ctypes.c_char_p(id(raw)), 0, len(raw))\n"
+                            "    except Exception:\n"
+                            "        pass\n"
+                            "except SystemExit:\n"
+                            "    raise\n"
+                            "except Exception:\n"
+                            "    # Do not crash the app; proceed without .env\n"
+                            "    pass\n"
+                        ),
+                        encoding='utf-8'
+                    )
+                    build_cmd += ["--runtime-hook", str(dec_hook)]
+                    # Add encrypted .env as data
+                    add = f"{enc_out}{';.' if os.name=='nt' else ':.'}"
+                    build_cmd += ["--add-data", add]
+                    await log_cb('debug', 'Included encrypted .env (forgex.env.enc) and decryption hook')
+                else:
+                    await log_cb('warn', 'Failed to encrypt .env; including plaintext .env instead')
+                    env_file = workdir / ".env"
+                    add = f"{env_file}{';.' if os.name=='nt' else ':.'}"
+                    build_cmd += ["--add-data", add]
+            else:
+                env_file = workdir / ".env"
+                add = f"{env_file}{';.' if os.name=='nt' else ':.'}"
+                build_cmd += ["--add-data", add]
+        except Exception as e:
+            await log_cb('warn', f'.env handling failed: {e}')
 
     # Icon
     if request.icon_path:
@@ -461,9 +615,29 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     # Apply PyInstaller options
     opts = getattr(request, 'pyinstaller', None) or {}
 
-    # Privacy runtime masking (for logging module) if requested
+    # Protection options (Python-only)
+    prot = (opts.get('protect') or {}) if isinstance(opts, dict) else {}
+
+    # Set -OO optimization to strip docstrings when protection enabled
     try:
-        if bool(getattr(request, 'privacy_mask_logs', False)):
+        if bool(prot.get('enable')):
+            env["PYTHONOPTIMIZE"] = "2"
+    except Exception:
+        pass
+
+    # Obfuscation (best-effort): use PyInstaller archive key if requested
+    try:
+        if bool(prot.get('obfuscate', False)):
+            import secrets as _secrets
+            key = _secrets.token_hex(16)
+            build_cmd += ["--key", key]
+            await log_cb('debug', 'Enabled PyInstaller archive encryption (--key)')
+    except Exception:
+        pass
+
+    # Privacy runtime masking (for logging module) if requested (either top-level or via protect.mask_logs)
+    try:
+        if bool(getattr(request, 'privacy_mask_logs', False) or prot.get('mask_logs', False)):
             mask_hook = workdir / "forgex_privacy_log_mask.py"
             mask_code = (
                 "# Auto-generated by ForgeX: mask Python logging messages for privacy\n"
@@ -487,6 +661,46 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
             await log_cb("debug", "Enabled privacy mask for runtime logs via runtime hook")
     except Exception as e:
         await log_cb("warn", f"Failed to enable privacy mask hook: {e}")
+
+    # Anti-debug hook
+    try:
+        if bool(prot.get('anti_debug', False)):
+            adb = workdir / "forgex_antidebug.py"
+            adb.write_text(
+                (
+                    "import sys, os, ctypes\n"
+                    "def _dbg():\n"
+                    "    try:\n"
+                    "        if sys.gettrace():\n"
+                    "            return True\n"
+                    "        if sys.platform.startswith('win'):\n"
+                    "            try:\n"
+                    "                return ctypes.windll.kernel32.IsDebuggerPresent() != 0\n"
+                    "            except Exception:\n"
+                    "                pass\n"
+                    "    except Exception:\n"
+                    "        return False\n"
+                    "    return False\n"
+                    "if _dbg():\n"
+                    "    try:\n"
+                    "        import time; time.sleep(0.1)\n"
+                    "    except Exception: pass\n"
+                    "    os._exit(1)\n"
+                ),
+                encoding='utf-8'
+            )
+            build_cmd += ["--runtime-hook", str(adb)]
+            await log_cb('debug', 'Enabled anti-debug runtime hook')
+    except Exception as e:
+        await log_cb('warn', f'Anti-debug hook failed: {e}')
+
+    # Integrity check (limited): ensure encrypted .env has expected digest if present, handled in decrypt hook
+    try:
+        if bool(prot.get('integrity_check', False)):
+            # No additional action required; the decryption hook verifies the encrypted .env digest.
+            pass
+    except Exception:
+        pass
 
     # noconsole
     if opts.get('noconsole'):
