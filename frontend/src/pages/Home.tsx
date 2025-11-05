@@ -51,6 +51,18 @@ export default function Home() {
   const [dragOver, setDragOver] = useState(false)
   const [uploadPhase, setUploadPhase] = useState<'idle'|'zipping'|'uploading'|'done'|'error'>('idle')
   const [zipProgress, setZipProgress] = useState<{done:number,total:number}>({done:0,total:0})
+  // Protection options (Python / PyInstaller advanced)
+  const [protectEnable, setProtectEnable] = useState(false)
+  const [protectLevel, setProtectLevel] = useState<'basic'|'strong'|'max'>('basic')
+  const [protectObfuscate, setProtectObfuscate] = useState(false)
+  const [protectAntiDebug, setProtectAntiDebug] = useState(true)
+  const [protectIntegrity, setProtectIntegrity] = useState(true)
+  const [encryptEnv, setEncryptEnv] = useState(includeEnv)
+  const [encMode, setEncMode] = useState<'inline'|'env'|'file'>('env')
+  const [encPassphrase, setEncPassphrase] = useState('')
+  const [encEnvVar, setEncEnvVar] = useState('FGX_ENV_KEY')
+  const [encFilePath, setEncFilePath] = useState('')
+
   const navigate = useNavigate()
 
   useEffect(() => { getBuildHistory().then(setHistory) }, [])
@@ -86,6 +98,26 @@ export default function Home() {
     const cd = toList(pyiCollectData); if (cd.length) pyi.collect_data = cd
     const rh = toList(pyiRuntimeHooks); if (rh.length) pyi.runtime_hooks = rh
     const ahd = toList(pyiAdditionalHooksDir); if (ahd.length) pyi.additional_hooks_dir = ahd
+
+    // Protection block
+    if (protectEnable) {
+      const enc = includeEnv && encryptEnv ? {
+        enable: true,
+        mode: encMode,
+        passphrase: encMode === 'inline' ? (encPassphrase || undefined) : undefined,
+        env_var: encMode === 'env' ? (encEnvVar || 'FGX_ENV_KEY') : undefined,
+        file_path: encMode === 'file' ? (encFilePath || undefined) : undefined,
+      } : undefined
+      pyi.protect = {
+        enable: true,
+        level: protectLevel,
+        obfuscate: protectObfuscate || undefined,
+        anti_debug: protectAntiDebug || undefined,
+        integrity_check: protectIntegrity || undefined,
+        mask_logs: maskRuntimeLogs || undefined,
+        encrypt_env: enc,
+      }
+    }
 
     const req = {
       project_path: projectPath,
@@ -485,6 +517,76 @@ export default function Home() {
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Protection options */}
+          {language === 'python' && (
+            <div className="mt-2 border border-gray-800 rounded p-3 bg-black/30">
+              <div className="flex items-center gap-3">
+                <input id="protect_en" type="checkbox" checked={protectEnable} onChange={e=>setProtectEnable(e.target.checked)} />
+                <label htmlFor="protect_en">Protect build (Python only)</label>
+                {protectEnable && (
+                  <select className="bg-gray-900 border border-gray-700 rounded px-2 py-1 ml-3" value={protectLevel} onChange={e=>setProtectLevel(e.target.value as any)}>
+                    <option value="basic">Basic</option>
+                    <option value="strong">Strong</option>
+                    <option value="max">Max</option>
+                  </select>
+                )}
+              </div>
+              {protectEnable && (
+                <div className="mt-3 space-y-3">
+                  <div className="flex items-center gap-3">
+                    <input id="prot_obf" type="checkbox" checked={protectObfuscate} onChange={e=>setProtectObfuscate(e.target.checked)} />
+                    <label htmlFor="prot_obf">Obfuscate code (PyArmor)</label>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <input id="prot_dbg" type="checkbox" checked={protectAntiDebug} onChange={e=>setProtectAntiDebug(e.target.checked)} />
+                    <label htmlFor="prot_dbg">Anti-debug</label>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <input id="prot_int" type="checkbox" checked={protectIntegrity} onChange={e=>setProtectIntegrity(e.target.checked)} />
+                    <label htmlFor="prot_int">Integrity check (.env package)</label>
+                  </div>
+                  <div className="mt-2">
+                    <div className="flex items-center gap-3">
+                      <input id="prot_envenc" type="checkbox" checked={encryptEnv} onChange={e=>setEncryptEnv(e.target.checked)} disabled={!includeEnv} />
+                      <label htmlFor="prot_envenc">Encrypt included .env</label>
+                      {!includeEnv && <span className="text-xs text-gray-500">(Enable \"Include .env\" above)</span>}
+                    </div>
+                    {includeEnv && encryptEnv && (
+                      <div className="ml-5 mt-2 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <label className="text-xs text-gray-400">Mode</label>
+                          <select className="bg-gray-900 border border-gray-700 rounded px-2 py-1" value={encMode} onChange={e=>setEncMode(e.target.value as any)}>
+                            <option value="env">Env var (default)</option>
+                            <option value="file">File</option>
+                            <option value="inline">Inline (dev only)</option>
+                          </select>
+                        </div>
+                        {encMode === 'env' && (
+                          <div className="flex items-center gap-2">
+                            <label className="text-xs text-gray-400">Env var name</label>
+                            <input className="bg-gray-900 border border-gray-700 rounded px-2 py-1" value={encEnvVar} onChange={e=>setEncEnvVar(e.target.value)} />
+                          </div>
+                        )}
+                        {encMode === 'file' && (
+                          <div className="flex items-center gap-2">
+                            <label className="text-xs text-gray-400">Passphrase file path</label>
+                            <input className="bg-gray-900 border border-gray-700 rounded px-2 py-1" placeholder="e.g. .\\secret.key" value={encFilePath} onChange={e=>setEncFilePath(e.target.value)} />
+                          </div>
+                        )}
+                        {encMode === 'inline' && (
+                          <div className="flex items-center gap-2">
+                            <label className="text-xs text-gray-400">Passphrase</label>
+                            <input type="password" className="bg-gray-900 border border-gray-700 rounded px-2 py-1" placeholder="for development only" value={encPassphrase} onChange={e=>setEncPassphrase(e.target.value)} />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
