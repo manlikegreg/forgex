@@ -114,6 +114,32 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
 
     # Install deps if requirements.txt exists (skip in offline mode)
     req = workdir / "requirements.txt"
+    if offline and req.exists():
+        # Verify required packages are available system-wide (no network installs)
+        import re as _re
+        def _parse_pkg(line: str) -> str:
+            s = line.strip()
+            # drop markers and hashes
+            s = s.split(';', 1)[0].split('#', 1)[0].strip()
+            if not s or s.startswith(('-', 'git+', 'http:', 'https:')):
+                return ''
+            # extract name before version spec/extras
+            m = _re.match(r"^[A-Za-z0-9_.-]+", s)
+            return m.group(0) if m else ''
+        missing = []
+        try:
+            for raw in req.read_text(encoding='utf-8', errors='ignore').splitlines():
+                name = _parse_pkg(raw)
+                if not name:
+                    continue
+                rc = await _run_and_stream([str(py_bin), "-m", "pip", "show", name], env, workdir, lambda lvl, msg: None, timeout_seconds, cancel_event)
+                if rc != 0:
+                    missing.append(name)
+        except Exception:
+            pass
+        if missing:
+            await log_cb('error', f"Offline build: missing required packages: {', '.join(sorted(set(missing)))}. Install them system-wide or disable Offline build.")
+            return []
     if not offline and req.exists():
         await log_cb("debug", f"Installing requirements from {req}")
         code = await _run_and_stream([str(py_bin), "-m", "pip", "install", "-r", str(req)], env, workdir, log_cb, timeout_seconds, cancel_event)
@@ -250,6 +276,30 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         entry_path = (workdir / entry)
     local_req = entry_path.parent / "requirements.txt"
     try:
+        if offline and local_req.exists() and str(local_req) != str(req):
+            # Verify local requirements in offline mode
+            import re as _re
+            def _parse_pkg(line: str) -> str:
+                s = line.strip()
+                s = s.split(';', 1)[0].split('#', 1)[0].strip()
+                if not s or s.startswith(('-', 'git+', 'http:', 'https:')):
+                    return ''
+                m = _re.match(r"^[A-Za-z0-9_.-]+", s)
+                return m.group(0) if m else ''
+            missing = []
+            try:
+                for raw in local_req.read_text(encoding='utf-8', errors='ignore').splitlines():
+                    name = _parse_pkg(raw)
+                    if not name:
+                        continue
+                    rc = await _run_and_stream([str(py_bin), "-m", "pip", "show", name], env, workdir, lambda lvl, msg: None, timeout_seconds, cancel_event)
+                    if rc != 0:
+                        missing.append(name)
+            except Exception:
+                pass
+            if missing:
+                await log_cb('error', f"Offline build: missing local requirements: {', '.join(sorted(set(missing)))}. Install them system-wide or disable Offline build.")
+                return []
         if not offline and local_req.exists() and str(local_req) != str(req):
             await log_cb("debug", f"Installing requirements from {local_req}")
             code = await _run_and_stream([str(py_bin), "-m", "pip", "install", "-r", str(local_req)], env, workdir, log_cb, timeout_seconds, cancel_event)
@@ -295,28 +345,42 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     try:
         hook_code = (
             "try:\n"
-            "    import sys\n"
+            "    import os, sys\n"
             "    from pathlib import Path\n"
             "    try:\n"
-            "        from dotenv import load_dotenv\n"
+            "        from dotenv import load_dotenv as _ld\n"
             "    except Exception:\n"
-            "        load_dotenv = None\n"
-            "    if load_dotenv:\n"
-            "        candidates = []\n"
-            "        if getattr(sys, 'frozen', False):\n"
-            "            mp = getattr(sys, '_MEIPASS', '')\n"
-            "            if mp:\n"
-            "                candidates.append(Path(mp) / '.env')\n"
-            "            candidates.append(Path(sys.executable).parent / '.env')\n"
-            "        else:\n"
-            "            candidates.append(Path(__file__).parent / '.env')\n"
-            "        for p in candidates:\n"
-            "            try:\n"
-            "                if p.exists():\n"
-            "                    load_dotenv(p, override=False)\n"
-            "                    break\n"
-            "            except Exception:\n"
-            "                pass\n"
+            "        _ld = None\n"
+            "    def _simple_load(path: Path):\n"
+            "        try:\n"
+            "            for line in path.read_text(encoding='utf-8', errors='ignore').splitlines():\n"
+            "                s=line.strip()\n"
+            "                if not s or s.startswith('#') or '=' not in s:\n"
+            "                    continue\n"
+            "                k,v=s.split('=',1)\n"
+            "                k=k.strip(); v=v.strip().strip('\"').strip(\"'\")\\n"
+            "                if k and (k not in os.environ):\n"
+            "                    os.environ[k]=v\n"
+            "        except Exception:\n"
+            "            pass\n"
+            "    candidates = []\n"
+            "    if getattr(sys, 'frozen', False):\n"
+            "        mp = getattr(sys, '_MEIPASS', '')\n"
+            "        if mp:\n"
+            "            candidates.append(Path(mp) / '.env')\n"
+            "        candidates.append(Path(sys.executable).parent / '.env')\n"
+            "    else:\n"
+            "        candidates.append(Path(__file__).parent / '.env')\n"
+            "    for p in candidates:\n"
+            "        try:\n"
+            "            if p.exists():\n"
+            "                if _ld:\n"
+            "                    _ld(p, override=False)\n"
+            "                else:\n"
+            "                    _simple_load(p)\n"
+            "                break\n"
+            "        except Exception:\n"
+            "            pass\n"
             "except Exception:\n"
             "    pass\n"
         )
