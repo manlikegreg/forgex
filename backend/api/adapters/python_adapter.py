@@ -798,15 +798,34 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     except Exception:
         pass
 
-    # Obfuscation (best-effort): use PyInstaller archive key if requested
+    # Obfuscation (best-effort): use PyInstaller archive key if requested and supported (< v6)
     try:
         if bool(prot.get('obfuscate', False)):
-            import secrets as _secrets
-            key = _secrets.token_hex(16)
-            build_cmd += ["--key", key]
-            await log_cb('debug', 'Enabled PyInstaller archive encryption (--key)')
-    except Exception:
-        pass
+            version = "0.0"
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    str(py_bin), "-c", "import PyInstaller, sys; print(getattr(PyInstaller,'__version__','0.0'))",
+                    cwd=str(workdir), env=env,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                out, err = await proc.communicate()
+                if proc.returncode == 0:
+                    version = out.decode(errors='ignore').strip()
+            except Exception:
+                pass
+            try:
+                major = int((version.split('.') or ['0'])[0])
+            except Exception:
+                major = 0
+            if major and major < 6:
+                import secrets as _secrets
+                key = _secrets.token_hex(16)
+                build_cmd += ["--key", key]
+                await log_cb('debug', f"Enabled PyInstaller archive key (--key) for v{version}")
+            else:
+                await log_cb('warn', f"PyInstaller v{version} does not support --key; skipping obfuscation")
+    except Exception as e:
+        await log_cb('warn', f"Obfuscation step skipped: {e}")
 
     # Privacy runtime masking (for logging module) if requested (either top-level or via protect.mask_logs)
     try:
