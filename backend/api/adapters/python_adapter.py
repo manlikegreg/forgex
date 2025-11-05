@@ -91,30 +91,43 @@ async def _run_and_stream(cmd: List[str], env: Dict[str, str], cwd: Path, log_cb
 
 async def build_python(workdir: Path, project_name: str, build_id: str, request, log_cb, timeout_seconds: int, cancel_event: asyncio.Event) -> List[str]:
     """Build using PyInstaller in onefile mode and return list of artifacts."""
-    await log_cb("debug", f"Creating venv in {workdir / '.venv'}")
-    venv_dir, py_bin, pip_bin = await ensure_venv_async(workdir)
-    env = os.environ.copy()
-    env["VIRTUAL_ENV"] = str(venv_dir)
-    env["PATH"] = f"{venv_dir / ('Scripts' if os.name=='nt' else 'bin')}{os.pathsep}" + env.get("PATH", "")
+    import sys as _sys
+    offline = bool(getattr(request, 'offline_build', False))
     # Defer extra PyInstaller args here so early phases can append before build_cmd exists
     pyi_extras: List[str] = []
+    if offline:
+        await log_cb("info", "Offline build: using system Python/site-packages (no venv, no network installs)")
+        venv_dir = None
+        py_bin = Path(_sys.executable)
+        env = os.environ.copy()
+        # Verify PyInstaller is available
+        chk = await _run_and_stream([str(py_bin), "-c", "import PyInstaller"], env, workdir, log_cb, timeout_seconds, cancel_event)
+        if chk != 0:
+            await log_cb("error", "PyInstaller not available in system environment. Install it (pip install pyinstaller) or disable Offline build.")
+            return []
+    else:
+        await log_cb("debug", f"Creating venv in {workdir / '.venv'}")
+        venv_dir, py_bin, pip_bin = await ensure_venv_async(workdir)
+        env = os.environ.copy()
+        env["VIRTUAL_ENV"] = str(venv_dir)
+        env["PATH"] = f"{venv_dir / ('Scripts' if os.name=='nt' else 'bin')}{os.pathsep}" + env.get("PATH", "")
 
-    # Install deps if requirements.txt exists
+    # Install deps if requirements.txt exists (skip in offline mode)
     req = workdir / "requirements.txt"
-    if req.exists():
+    if not offline and req.exists():
         await log_cb("debug", f"Installing requirements from {req}")
-        code = await _run_and_stream([str(pip_bin), "install", "-r", str(req)], env, workdir, log_cb, timeout_seconds, cancel_event)
+        code = await _run_and_stream([str(py_bin), "-m", "pip", "install", "-r", str(req)], env, workdir, log_cb, timeout_seconds, cancel_event)
         if code != 0:
             return []
-    # Ensure pyinstaller available
-    await log_cb("info", "Installing PyInstaller (this may take a few minutes)...")
-    code = await _run_and_stream([str(pip_bin), "install", "pyinstaller"], env, workdir, log_cb, timeout_seconds, cancel_event)
-    if code != 0:
-        return []
-
-    # Best-effort ensure python-dotenv so the runtime hook can load .env automatically
-    await log_cb("debug", "Ensuring python-dotenv is installed (optional)")
-    _ = await _run_and_stream([str(pip_bin), "install", "python-dotenv"], env, workdir, log_cb, timeout_seconds, cancel_event)
+    # Ensure pyinstaller available (only in venv mode)
+    if not offline:
+        await log_cb("info", "Installing PyInstaller (this may take a few minutes)...")
+        code = await _run_and_stream([str(py_bin), "-m", "pip", "install", "pyinstaller"], env, workdir, log_cb, timeout_seconds, cancel_event)
+        if code != 0:
+            return []
+        # Best-effort ensure python-dotenv so the runtime hook can load .env automatically
+        await log_cb("debug", "Ensuring python-dotenv is installed (optional)")
+        _ = await _run_and_stream([str(py_bin), "-m", "pip", "install", "python-dotenv"], env, workdir, log_cb, timeout_seconds, cancel_event)
 
     # Determine entry
     entry: Optional[str] = _parse_entry_from_start(request.start_command)
@@ -237,9 +250,9 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         entry_path = (workdir / entry)
     local_req = entry_path.parent / "requirements.txt"
     try:
-        if local_req.exists() and str(local_req) != str(req):
+        if not offline and local_req.exists() and str(local_req) != str(req):
             await log_cb("debug", f"Installing requirements from {local_req}")
-            code = await _run_and_stream([str(pip_bin), "install", "-r", str(local_req)], env, workdir, log_cb, timeout_seconds, cancel_event)
+            code = await _run_and_stream([str(py_bin), "-m", "pip", "install", "-r", str(local_req)], env, workdir, log_cb, timeout_seconds, cancel_event)
             if code != 0:
                 return []
     except Exception as e:
@@ -335,13 +348,15 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                 auto_pkgs.append('flask')
             if 'from django' in low or 'import django' in low:
                 auto_pkgs.append('django')
-            if auto_pkgs:
+            if auto_pkgs and not offline:
                 # de-duplicate
                 pkgs = sorted(set(auto_pkgs))
                 await log_cb('info', f"Installing runtime packages: {', '.join(pkgs)} (this may take a while)...")
-                code = await _run_and_stream([str(pip_bin), 'install', *pkgs], env, workdir, log_cb, timeout_seconds, cancel_event)
+                code = await _run_and_stream([str(py_bin), '-m', 'pip', 'install', *pkgs], env, workdir, log_cb, timeout_seconds, cancel_event)
                 if code != 0:
                     await log_cb('warn', 'Auto-install of detected packages failed; continuing')
+            elif auto_pkgs and offline:
+                await log_cb('info', 'Offline build: skipping auto-install of detected packages; ensure they are available system-wide')
         except Exception as e:
             await log_cb('warn', f'Auto-detect install step skipped: {e}')
 
@@ -458,7 +473,10 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         try:
             if bool(env_enc.get('enable')):
                 # Ensure cryptography is available
-                _ = await _run_and_stream([str(pip_bin), "install", "cryptography"], env, workdir, log_cb, timeout_seconds, cancel_event)
+                if not offline:
+                    _ = await _run_and_stream([str(py_bin), "-m", "pip", "install", "cryptography"], env, workdir, log_cb, timeout_seconds, cancel_event)
+                else:
+                    await log_cb('info', 'Offline build: skipping cryptography install; if unavailable, .env encryption will be skipped')
                 # Prepare encryption helper
                 enc_script = workdir / "forgex_env_encrypt.py"
                 enc_out = workdir / "forgex.env.enc"
@@ -793,9 +811,13 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     if icon_source and icon_source.exists():
         ext = icon_source.suffix.lower()
         if is_win_target and ext not in {'.ico', '.exe'}:
-            # Try to auto-convert to .ico using Pillow inside the build venv
+            # Try to auto-convert to .ico using Pillow
             await log_cb("info", f"Icon provided ({icon_source.name}); converting to .ico for Windows")
-            _ = await _run_and_stream([str(pip_bin), "install", "pillow"], env, workdir, log_cb, timeout_seconds, cancel_event)
+            if not 'PIL' in globals():
+                if not offline:
+                    _ = await _run_and_stream([str(py_bin), "-m", "pip", "install", "pillow"], env, workdir, log_cb, timeout_seconds, cancel_event)
+                else:
+                    await log_cb("info", "Offline build: skipping Pillow install; conversion may fail if Pillow is not installed")
             out_ico = workdir / "forgex_icon_converted.ico"
             conv_code = (
                 "from PIL import Image; import sys; "
