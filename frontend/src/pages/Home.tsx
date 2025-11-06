@@ -24,6 +24,7 @@ export default function Home() {
   const [winHelperLog, setWinHelperLog] = useState(false)
   const [winHelperLogName, setWinHelperLogName] = useState('')
   const [offlineBuild, setOfflineBuild] = useState(false)
+  const [envVerbose, setEnvVerbose] = useState(false)
   const [signEnable, setSignEnable] = useState(false)
   const [signCert, setSignCert] = useState('')
   const [signPwd, setSignPwd] = useState('')
@@ -149,6 +150,7 @@ export default function Home() {
       win_helper_log: winHelperLog || undefined,
       win_helper_log_name: winHelperLog ? (winHelperLogName || undefined) : undefined,
       verbose,
+      env_verbose: envVerbose || undefined,
       offline_build: offlineBuild || undefined,
     } as any
     const res = await startBuild(req)
@@ -407,6 +409,10 @@ export default function Home() {
             <div className="mt-3 flex items-center gap-3">
               <input id="verbose" type="checkbox" checked={verbose} onChange={e=>setVerbose(e.target.checked)} />
               <label htmlFor="verbose" title="Include debug logs from the backend build process">Verbose logs</label>
+            </div>
+            <div className="mt-2 flex items-center gap-3">
+              <input id="env_verbose" type="checkbox" checked={envVerbose} onChange={e=>setEnvVerbose(e.target.checked)} />
+              <label htmlFor="env_verbose" title="Write .env load/decrypt debug to a log next to the EXE (envload.log)">Verbose .env load logging</label>
             </div>
             <div className="mt-3 flex items-center gap-3">
               <input id="mask_logs" type="checkbox" checked={maskRuntimeLogs} onChange={e=>setMaskRuntimeLogs(e.target.checked)} />

@@ -54,10 +54,10 @@ def run_backend(port: str) -> Tuple[subprocess.Popen, threading.Thread, threadin
     else:
         env['PYTHONPATH'] = str(ROOT)
 
-    cmd = [sys.executable or 'python', '-m', 'uvicorn', 'backend.main:app', '--host', os.getenv('FORGEX_BACKEND_HOST', '127.0.0.1'), '--port', port]
+    cmd = [sys.executable or 'python', '-m', 'uvicorn', 'main:app', '--host', os.getenv('FORGEX_BACKEND_HOST', '127.0.0.1'), '--port', port]
     proc = subprocess.Popen(
         cmd,
-        cwd=str(ROOT),
+        cwd=str(BACKEND_DIR),
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

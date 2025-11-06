@@ -16,21 +16,30 @@ def safe_copytree(src: str, dst: str, include: Optional[Iterable[str]] = None, e
 
     include = set(include or [])
     # Default excludes to prevent huge/unwanted copies and wrong entry detection
+    # IMPORTANT: treat excludes as path-segment names, not substrings, so '.env' is not skipped by 'env'.
     default_exclude = {
         ".git", "__pycache__", ".venv", "venv", "env", "node_modules", "dist", "build",
         ".idea", ".pytest_cache", ".mypy_cache", "site-packages"
     }
-    exclude = set(exclude or []) | default_exclude
+    exclude_names = set(exclude or []) | default_exclude
+
+    def _is_excluded_dir(rel_dir: Path) -> bool:
+        # Exclude if any directory path segment matches an exclude name exactly
+        return any(part in exclude_names for part in rel_dir.parts)
+
+    def _is_excluded_file(rel_file: Path) -> bool:
+        # Only consider parent directories for exclusion; do not exclude by file name equality
+        return any(part in exclude_names for part in rel_file.parent.parts)
 
     for root, dirs, files in os.walk(src):
         rel_root = Path(root).relative_to(src_p)
-        # Apply exclude patterns (simple substring match)
-        dirs[:] = [d for d in dirs if not any(pat in str(Path(rel_root, d)) for pat in exclude)]
+        # Filter directories by path-segment equality (not substring)
+        dirs[:] = [d for d in dirs if not _is_excluded_dir(Path(rel_root, d))]
 
         for f in files:
             rel_file = Path(rel_root, f)
-            # Skip excluded files
-            if any(pat in str(rel_file) for pat in exclude):
+            # Skip excluded files (by parent directory segments)
+            if _is_excluded_file(rel_file):
                 continue
             # If include list provided, only copy those paths
             if include and not any(str(rel_file).startswith(p) for p in include):

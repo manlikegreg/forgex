@@ -70,6 +70,8 @@ export type BuildRequest = {
   win_helper_log_name?: string
   target_os?: 'windows'|'linux'|'macos'
   verbose?: boolean
+  // Enable verbose .env load/decrypt logging inside the packaged app; writes <exe>.envload.log
+  env_verbose?: boolean
   privacy_mask_logs?: boolean
   // Offline build: use system Python/site-packages (no venv, no network installs)
   offline_build?: boolean

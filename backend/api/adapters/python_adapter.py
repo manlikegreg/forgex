@@ -159,7 +159,11 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     entry: Optional[str] = _parse_entry_from_start(request.start_command)
     EXCLUDED_DIRS = {'.venv', 'venv', 'env', 'node_modules', 'dist', 'build', '__pycache__', '.git'}
     def _is_excluded(path: Path) -> bool:
+        # Exclude paths that pass through known heavy directories
         return any(part in EXCLUDED_DIRS for part in path.parts)
+    def _is_excluded_dir(path: Path) -> bool:
+        # Exclude only by parent directories; never exclude by file name
+        return any(part in EXCLUDED_DIRS for part in path.parent.parts)
 
     if entry:
         cand = workdir / entry
@@ -351,13 +355,23 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     try:
         hook_code = (
             "try:\n"
-            "    import os, sys\n"
+            "    import os, sys, json\n"
             "    from pathlib import Path\n"
+            "    DBG = os.environ.get('FGX_ENV_DEBUG') or ''\n"
+            "    def _dbg(m):\n"
+            "        if not DBG: return\n"
+            "        try:\n"
+            "            exe = getattr(sys, 'executable', 'app')\n"
+            "            p = Path(exe).with_suffix('.envload.log')\n"
+            "            with open(p, 'a', encoding='utf-8') as f: f.write(m); f.write(chr(10))\n"
+            "        except Exception: pass\n"
+            "    _dbg('[env_auto] start')\n"
             "    try:\n"
             "        from dotenv import load_dotenv as _ld\n"
             "    except Exception:\n"
             "        _ld = None\n"
             "    def _simple_load(path: Path):\n"
+            "        cnt = 0\n"
             "        try:\n"
             "            for line in path.read_text(encoding='utf-8', errors='ignore').splitlines():\n"
             "                s=line.strip()\n"
@@ -370,26 +384,36 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
             "                    v = v[1:-1]\n"
             "                if k and (k not in os.environ):\n"
             "                    os.environ[k]=v\n"
+            "                    cnt += 1\n"
             "        except Exception:\n"
             "            pass\n"
+            "        return cnt\n"
             "    candidates = []\n"
+            "    names = ('.env', '.env.example', 'forgex.env', 'env', 'env.txt', 'config.env', 'dotenv', 'dotenv.txt')\n"
             "    if getattr(sys, 'frozen', False):\n"
             "        mp = getattr(sys, '_MEIPASS', '')\n"
             "        if mp:\n"
-            "            candidates.append(Path(mp) / '.env')\n"
-            "        candidates.append(Path(sys.executable).parent / '.env')\n"
+            "            for n in names: candidates.append(Path(mp) / n)\n"
+            "        for n in names: candidates.append(Path(sys.executable).parent / n)\n"
             "    else:\n"
-            "        candidates.append(Path(__file__).parent / '.env')\n"
+            "        for n in names: candidates.append(Path(__file__).parent / n)\n"
+            "    _dbg('[env_auto] candidates: ' + ', '.join(str(p) for p in candidates))\n"
+            "    loaded = False\n"
             "    for p in candidates:\n"
             "        try:\n"
             "            if p.exists():\n"
             "                if _ld:\n"
+            "                    _dbg('[env_auto] load via python-dotenv: ' + str(p))\n"
             "                    _ld(p, override=False)\n"
             "                else:\n"
-            "                    _simple_load(p)\n"
+            "                    n = _simple_load(p)\n"
+            "                    _dbg('[env_auto] load via fallback: ' + str(p) + ' (' + str(n) + ' keys)')\n"
+            "                loaded = True\n"
             "                break\n"
-            "        except Exception:\n"
-            "            pass\n"
+            "        except Exception as e:\n"
+            "            _dbg('[env_auto] error: ' + str(e))\n"
+            "    if not loaded:\n"
+            "        _dbg('[env_auto] no .env found')\n"
             "except Exception:\n"
             "    pass\n"
         )
@@ -397,10 +421,21 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     except Exception:
         pass
 
+    # Optional: force-enable env debug via a small hook (before loaders)
+    env_verbose_hook = None
+    try:
+        if bool(getattr(request, 'env_verbose', False)):
+            env_verbose_hook = workdir / "forgex_env_verbose_on.py"
+            env_verbose_hook.write_text("import os\nos.environ.setdefault('FGX_ENV_DEBUG','1')\n", encoding='utf-8')
+    except Exception:
+        env_verbose_hook = None
+
     build_cmd = [
         str(py_bin), "-m", "PyInstaller", "--onefile", "--name", safe_name,
-        "--runtime-hook", str(hook_path),
     ]
+    if env_verbose_hook:
+        build_cmd += ["--runtime-hook", str(env_verbose_hook)]
+    build_cmd += ["--runtime-hook", str(hook_path)]
     # Append any deferred extras (e.g., hidden-imports) gathered earlier
     if pyi_extras:
         build_cmd += pyi_extras
@@ -542,332 +577,416 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         prot = {}
     env_enc = (prot.get('encrypt_env') or {}) if isinstance(prot, dict) else {}
 
-    if request.include_env and (workdir / ".env").exists():
+    if request.include_env:
         try:
-            if bool(env_enc.get('enable')):
-                # Ensure cryptography is available
-                if not offline:
-                    _ = await _run_and_stream([str(py_bin), "-m", "pip", "install", "cryptography"], env, workdir, log_cb, timeout_seconds, cancel_event)
-                else:
-                    await log_cb('info', 'Offline build: skipping cryptography install; if unavailable, .env encryption will be skipped')
-                # Prepare encryption helper
-                enc_script = workdir / "forgex_env_encrypt.py"
-                enc_out = workdir / "forgex.env.enc"
-                enc_script.write_text(
-                    (
-                        "import os, sys, json, base64, hashlib\n"
-                        "from pathlib import Path\n"
-                        "from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC\n"
-                        "from cryptography.hazmat.primitives import hashes\n"
-                        "from cryptography.hazmat.primitives.ciphers.aead import AESGCM\n"
-                        "def enc(passphrase: bytes, data: bytes) -> bytes:\n"
-                        "    import os\n"
-                        "    salt = os.urandom(16)\n"
-                        "    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n"
-                        "    key = kdf.derive(passphrase)\n"
-                        "    aes = AESGCM(key)\n"
-                        "    nonce = os.urandom(12)\n"
-                        "    ct = aes.encrypt(nonce, data, b'')\n"
-                        "    return b'FGXENV1' + salt + nonce + ct\n"
-                        "pp = os.environ.get('FGX_BUILD_ENV_PASSPHRASE','').encode('utf-8')\n"
-                        "if not pp:\n"
-                        "    print('no_passphrase', file=sys.stderr); sys.exit(2)\n"
-                        "inp = Path(sys.argv[1]).read_bytes()\n"
-                        "out = enc(pp, inp)\n"
-                        "Path(sys.argv[2]).write_bytes(out)\n"
-                    ),
-                    encoding='utf-8'
-                )
-                # Determine passphrase (inline for build or provided explicitly)
-                pp: Optional[str] = None
+            # Locate .env (prefer next to entry script, fallback to project root)
+            env_file = None
+            try:
+                ep_parent = entry_path.parent
+            except Exception:
+                ep_parent = None
+            if ep_parent and (ep_parent / '.env').exists():
+                env_file = ep_parent / '.env'
+            elif (workdir / '.env').exists():
+                env_file = workdir / '.env'
+            if env_file is None:
                 try:
-                    mode = (env_enc.get('mode') or 'env')
-                    if mode == 'inline':
-                        pp = env_enc.get('passphrase') or ''
-                    else:
-                        # For encryption step at build time we still need a passphrase; fallback to inline if not provided
-                        pp = env_enc.get('passphrase') or ''
+                    candidates = [p for p in workdir.rglob('.env') if p.is_file() and not _is_excluded_dir(p)]
+                    if candidates:
+                        env_file = candidates[0]
                 except Exception:
-                    pp = ''
-                if not pp:
-                    # Generate a random dev key and switch runtime mode to inline implicitly
-                    import secrets, base64 as _b64
-                    pp = _b64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8')
-                    env_enc['mode'] = 'inline'
-                    env_enc['passphrase'] = pp
-                    await log_cb('warn', 'No passphrase provided for .env encryption; generated a random inline key (less secure).')
-                enc_env_vars = env.copy()
-                enc_env_vars['FGX_BUILD_ENV_PASSPHRASE'] = pp
-                code = await _run_and_stream([str(py_bin), str(enc_script), str(workdir / '.env'), str(enc_out)], enc_env_vars, workdir, log_cb, timeout_seconds, cancel_event)
-                if code == 0 and enc_out.exists():
-                    # Compute digest for integrity hook
-                    import hashlib as _hl
-                    try:
-                        h = _hl.sha256(); h.update(enc_out.read_bytes()); expected_env_sha = h.hexdigest()
-                    except Exception:
-                        expected_env_sha = ''
-                    # Write runtime decrypt hook
-                    dec_hook = workdir / "forgex_env_decrypt.py"
-                    env_var_name = (env_enc.get('env_var') or 'FGX_ENV_KEY')
-                    file_path = (env_enc.get('file_path') or '')
-                    mode = (env_enc.get('mode') or 'env')
-                    inline_pp = (env_enc.get('passphrase') or '') if mode == 'inline' else ''
-                    # Seal the inline passphrase using the build venv (ensures cryptography is available)
-                    _SEALED_PP_B64 = ''
-                    _PEPPER_B64 = ''
-                    try:
-                        seal_script = workdir / "forgex_pp_seal.py"
-                        seal_script.write_text(
-                            (
-                                "import os, sys, base64\n"
-                                "from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC\n"
-                                "from cryptography.hazmat.primitives import hashes\n"
-                                "from cryptography.hazmat.primitives.ciphers.aead import AESGCM\n"
-                                "pp = (sys.argv[1] if len(sys.argv)>1 else '').encode('utf-8')\n"
-                                "pep = os.urandom(16)\n"
-                                "salt = os.urandom(16)\n"
-                                "nonce = os.urandom(12)\n"
-                                "kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n"
-                                "key = kdf.derive(pep)\n"
-                                "ct = AESGCM(key).encrypt(nonce, pp, b'FGXPP1')\n"
-                                "sealed = b'FGXPP1' + salt + nonce + ct\n"
-                                "print(base64.b64encode(sealed).decode('ascii'))\n"
-                                "print(base64.b64encode(pep).decode('ascii'))\n"
-                            ),
-                            encoding='utf-8'
-                        )
-                        proc = await asyncio.create_subprocess_exec(
-                            str(py_bin), str(seal_script), inline_pp,
-                            cwd=str(workdir), env=env,
-                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                        )
-                        out, err = await proc.communicate()
-                        if proc.returncode == 0:
-                            try:
-                                txt = out.decode('utf-8', errors='ignore').strip().splitlines()
-                                if len(txt) >= 2:
-                                    _SEALED_PP_B64, _PEPPER_B64 = txt[0].strip(), txt[1].strip()
-                            except Exception:
-                                pass
-                    except Exception as _e:
-                        await log_cb('warn', f'Inline passphrase sealing failed; falling back to plaintext inline: {_e}')
-                        _SEALED_PP_B64 = ''
-                        _PEPPER_B64 = ''
-                    dec_hook.write_text(
+                    pass
+            # Also include .env.example if present (helpful for diagnostics)
+            env_example = None
+            try:
+                if ep_parent and (ep_parent / '.env.example').exists():
+                    env_example = ep_parent / '.env.example'
+                elif (workdir / '.env.example').exists():
+                    env_example = workdir / '.env.example'
+                if env_example is None:
+                    c2 = [p for p in workdir.rglob('.env.example') if p.is_file() and not _is_excluded_dir(p)]
+                    if c2:
+                        env_example = c2[0]
+            except Exception:
+                env_example = None
+            if env_example:
+                add_ex = f"{env_example}{';.' if os.name=='nt' else ':.'}"
+                build_cmd += ['--add-data', add_ex]
+                await log_cb('info', f"Bundled .env.example from {env_example}")
+            # Fallback: non-dot env filenames (useful when upload strips dotfiles)
+            if env_file is None:
+                try:
+                    FALLBACK_NAMES = ['forgex.env', 'env', 'env.txt', 'config.env', 'dotenv', 'dotenv.txt']
+                    # Prefer entry folder
+                    if ep_parent:
+                        for n in FALLBACK_NAMES:
+                            p = ep_parent / n
+                            if p.exists() and p.is_file() and not _is_excluded_dir(p):
+                                env_file = p
+                                break
+                    # Then project root
+                    if env_file is None:
+                        for n in FALLBACK_NAMES:
+                            p = workdir / n
+                            if p.exists() and p.is_file() and not _is_excluded_dir(p):
+                                env_file = p
+                                break
+                    # Finally, recursive search (excluding heavy dirs)
+                    if env_file is None:
+                        for n in FALLBACK_NAMES:
+                            cand = next((p for p in workdir.rglob(n) if p.is_file() and not _is_excluded_dir(p)), None)
+                            if cand:
+                                env_file = cand
+                                break
+                    if env_file:
+                        await log_cb('info', f"Found fallback env file: {env_file}")
+                except Exception:
+                    pass
+            if env_file:
+                if bool(env_enc.get('enable')):
+                    # Ensure cryptography is available
+                    if not offline:
+                        _ = await _run_and_stream([str(py_bin), '-m', 'pip', 'install', 'cryptography'], env, workdir, log_cb, timeout_seconds, cancel_event)
+                    else:
+                        await log_cb('info', 'Offline build: skipping cryptography install; if unavailable, .env encryption will be skipped')
+                    # Prepare encryption helper
+                    enc_script = workdir / 'forgex_env_encrypt.py'
+                    enc_out = workdir / 'forgex.env.enc'
+                    enc_script.write_text(
                         (
-                            "# Auto-generated by ForgeX: decrypt bundled .env at runtime (sealed inline + DPAPI cache)\n"
-                            "import sys, os, json, base64, hashlib, ctypes, struct\n"
-                            "from pathlib import Path\n"
-                            "from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC\n"
-                            "from cryptography.hazmat.primitives import hashes\n"
-                            "from cryptography.hazmat.primitives.ciphers.aead import AESGCM\n"
-                            f"_MODE = {repr(mode)}\n"
-                            f"_ENV_VAR = {repr(env_var_name)}\n"
-                            f"_FILE_PATH = {repr(file_path)}\n"
-                            f"_SEALED_PP_B64 = {repr(_SEALED_PP_B64)}\n"
-                            f"_PEPPER_B64 = {repr(_PEPPER_B64)}\n"
-                            f"_EXPECTED_ENV_SHA256 = {repr(expected_env_sha)}\n"
-                            f"_INLINE_PP_FB = {repr(inline_pp)}\n"
-                            "_HDR = b'FGXPP1'\n"
-                            "def _is_windows():\n"
-                            "    return sys.platform.startswith('win')\n"
-                            "def _exe_hash():\n"
-                            "    try:\n"
-                            "        p = Path(getattr(sys, 'executable', sys.argv[0]))\n"
-                            "        h = hashlib.sha256(); h.update(p.read_bytes()); return h.hexdigest()\n"
-                            "    except Exception:\n"
-                            "        return ''\n"
-                            "def _cache_key_name():\n"
-                            "    h = _exe_hash()[:16] if _exe_hash() else 'default'\n"
-                            "    return f'FGX_ENV_{h}'\n"
-                            "def _dpapi_protect(data: bytes) -> bytes:\n"
-                            "    if not _is_windows():\n"
-                            "        return b''\n"
-                            "    # DATA_BLOB struct\n"
-                            "    class DATA_BLOB(ctypes.Structure):\n"
-                            "        _fields_ = [('cbData', ctypes.c_uint), ('pbData', ctypes.POINTER(ctypes.c_byte))]\n"
-                            "    CryptProtectData = ctypes.windll.crypt32.CryptProtectData\n"
-                            "    LocalFree = ctypes.windll.kernel32.LocalFree\n"
-                            "    in_blob = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))\n"
-                            "    out_blob = DATA_BLOB()\n"
-                            "    if not CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0x01, ctypes.byref(out_blob)):\n"
-                            "        return b''\n"
-                            "    try:\n"
-                            "        res = ctypes.string_at(out_blob.pbData, out_blob.cbData)\n"
-                            "        return res\n"
-                            "    finally:\n"
-                            "        LocalFree(out_blob.pbData)\n"
-                            "def _dpapi_unprotect(data: bytes) -> bytes:\n"
-                            "    if not _is_windows():\n"
-                            "        return b''\n"
-                            "    class DATA_BLOB(ctypes.Structure):\n"
-                            "        _fields_ = [('cbData', ctypes.c_uint), ('pbData', ctypes.POINTER(ctypes.c_byte))]\n"
-                            "    CryptUnprotectData = ctypes.windll.crypt32.CryptUnprotectData\n"
-                            "    LocalFree = ctypes.windll.kernel32.LocalFree\n"
-                            "    in_blob = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))\n"
-                            "    out_blob = DATA_BLOB()\n"
-                            "    if not CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0x01, ctypes.byref(out_blob)):\n"
-                            "        return b''\n"
-                            "    try:\n"
-                            "        res = ctypes.string_at(out_blob.pbData, out_blob.cbData)\n"
-                            "        return res\n"
-                            "    finally:\n"
-                            "        LocalFree(out_blob.pbData)\n"
-                            "def _cache_put(pp: bytes):\n"
-                            "    if not (_is_windows() and pp):\n"
-                            "        return\n"
-                            "    try:\n"
-                            "        import winreg\n"
-                            "        data = _dpapi_protect(pp)\n"
-                            "        if not data:\n"
-                            "            return\n"
-                            "        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r'Software\\ForgeX\\Cache') as k:\n"
-                            "            winreg.SetValueEx(k, _cache_key_name(), 0, winreg.REG_BINARY, data)\n"
-                            "    except Exception:\n"
-                            "        pass\n"
-                            "def _cache_get() -> bytes:\n"
-                            "    if not _is_windows():\n"
-                            "        return b''\n"
-                            "    try:\n"
-                            "        import winreg\n"
-                            "        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\\ForgeX\\Cache') as k:\n"
-                            "            data, _ = winreg.QueryValueEx(k, _cache_key_name())\n"
-                            "            if isinstance(data, bytes) and data:\n"
-                            "                return _dpapi_unprotect(data)\n"
-                            "    except Exception:\n"
-                            "        return b''\n"
-                            "    return b''\n"
-                            "def _sealed_inline_pp() -> bytes:\n"
-                            "    try:\n"
-                            "        if not _SEALED_PP_B64 or not _PEPPER_B64:\n"
-                            "            return (_INLINE_PP_FB or '').encode('utf-8')\n"
-                            "        raw = base64.b64decode(_SEALED_PP_B64)\n"
-                            "        if not raw.startswith(_HDR):\n"
-                            "            return b''\n"
-                            "        salt = raw[len(_HDR):len(_HDR)+16]; nonce = raw[len(_HDR)+16:len(_HDR)+28]; ct = raw[len(_HDR)+28:]\n"
-                            "        pepper = base64.b64decode(_PEPPER_B64)\n"
-                            "        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n"
-                            "        key = kdf.derive(pepper)\n"
-                            "        aes = AESGCM(key)\n"
-                            "        return aes.decrypt(nonce, ct, _HDR)\n"
-                            "    except Exception:\n"
-                            "        return b''\n"
-                            "def _get_passphrase() -> bytes:\n"
-                            "    # Try DPAPI cache first\n"
-                            "    pp = _cache_get()\n"
-                            "    if pp:\n"
-                            "        return pp\n"
-                            "    # Then resolve from configured mode\n"
-                            "    if _MODE == 'env':\n"
-                            "        v = os.environ.get(_ENV_VAR, '')\n"
-                            "        pp = v.encode('utf-8')\n"
-                            "    elif _MODE == 'file':\n"
-                            "        try:\n"
-                            "            p = Path(_FILE_PATH)\n"
-                            "            pp = p.read_text(encoding='utf-8').strip().encode('utf-8')\n"
-                            "        except Exception:\n"
-                            "            pp = b''\n"
-                            "    elif _MODE == 'inline':\n"
-                            "        pp = _sealed_inline_pp()\n"
-                            "    else:\n"
-                            "        pp = b''\n"
-                            "    if pp:\n"
-                            "        _cache_put(pp)\n"
-                            "    return pp\n"
-                            "def _dec(passphrase: bytes, data: bytes) -> bytes:\n"
-                            "    if not data.startswith(b'FGXENV1'):\n"
-                            "        raise RuntimeError('invalid header')\n"
-                            "    salt = data[7:23]; nonce = data[23:35]; ct = data[35:]\n"
-                            "    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n"
-                            "    key = kdf.derive(passphrase)\n"
-                            "    aes = AESGCM(key)\n"
-                            "    return aes.decrypt(nonce, ct, b'')\n"
-                            "try:\n"
-                            "    base = Path(getattr(sys, '_MEIPASS', '')) if getattr(sys, 'frozen', False) else Path(__file__).parent\n"
-                            "    enc_p = base / 'forgex.env.enc'\n"
-                            "    if _EXPECTED_ENV_SHA256:\n"
-                            "        try:\n"
-                            "            h=hashlib.sha256(); h.update(enc_p.read_bytes());\n"
-                            "            if h.hexdigest() != _EXPECTED_ENV_SHA256:\n"
-                            "                raise SystemExit(1)\n"
-                            "        except Exception:\n"
-                            "            raise SystemExit(1)\n"
-                            "    raw = None\n"
-                            "    pp = _cache_get()\n"
-                            "    if pp:\n"
-                            "        try:\n"
-                            "            raw = _dec(pp, enc_p.read_bytes())\n"
-                            "        except Exception:\n"
-                            "            # DPAPI cache invalid; fall back to sealed-inline/env/file and refresh cache\n"
-                            "            pp2 = b''\n"
-                            "            if _MODE == 'env':\n"
-                            "                v = os.environ.get(_ENV_VAR, '')\n"
-                            "                pp2 = v.encode('utf-8')\n"
-                            "            elif _MODE == 'file':\n"
-                            "                try:\n"
-                            "                    p = Path(_FILE_PATH)\n"
-                            "                    pp2 = p.read_text(encoding='utf-8').strip().encode('utf-8')\n"
-                            "                except Exception:\n"
-                            "                    pp2 = b''\n"
-                            "            elif _MODE == 'inline':\n"
-                            "                pp2 = _sealed_inline_pp()\n"
-                            "            if pp2:\n"
-                            "                _cache_put(pp2)\n"
-                            "                raw = _dec(pp2, enc_p.read_bytes())\n"
-                            "    if raw is None:\n"
-                            "        # No cache or couldn't decrypt; resolve fresh and cache\n"
-                            "        pp3 = b''\n"
-                            "        if _MODE == 'env':\n"
-                            "            v = os.environ.get(_ENV_VAR, '')\n"
-                            "            pp3 = v.encode('utf-8')\n"
-                            "        elif _MODE == 'file':\n"
-                            "            try:\n"
-                            "                p = Path(_FILE_PATH)\n"
-                            "                pp3 = p.read_text(encoding='utf-8').strip().encode('utf-8')\n"
-                            "            except Exception:\n"
-                            "                pp3 = b''\n"
-                            "        elif _MODE == 'inline':\n"
-                            "            pp3 = _sealed_inline_pp()\n"
-                            "        if not pp3:\n"
-                            "            raise SystemExit(1)\n"
-                            "        _cache_put(pp3)\n"
-                            "        raw = _dec(pp3, enc_p.read_bytes())\n"
-                            "    # Load into environment without logging\n"
-                            "    for line in raw.decode('utf-8', errors='ignore').splitlines():\n"
-                            "        if not line or line.strip().startswith('#') or '=' not in line:\n"
-                            "            continue\n"
-                            "        k, v = line.split('=', 1)\n"
-                            "        if k and v is not None and (k not in os.environ):\n"
-                            "            os.environ[k.strip()] = v.strip()\n"
-                            "    # Best-effort zeroization\n"
-                            "    try:\n"
-                            "        import ctypes\n"
-                            "        ba = bytearray(raw)\n"
-                            "        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(ba)), 0, len(ba))\n"
-                            "    except Exception:\n"
-                            "        pass\n"
-                            "except SystemExit:\n"
-                            "    raise\n"
-                            "except Exception:\n"
-                            "    # Do not crash the app; proceed without .env\n"
-                            "    pass\n"
+                            'import os, sys, json, base64, hashlib\n'
+                            'from pathlib import Path\n'
+                            'from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC\n'
+                            'from cryptography.hazmat.primitives import hashes\n'
+                            'from cryptography.hazmat.primitives.ciphers.aead import AESGCM\n'
+                            'def enc(passphrase: bytes, data: bytes) -> bytes:\n'
+                            '    import os\n'
+                            '    salt = os.urandom(16)\n'
+                            '    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n'
+                            '    key = kdf.derive(passphrase)\n'
+                            '    aes = AESGCM(key)\n'
+                            '    nonce = os.urandom(12)\n'
+                            '    ct = aes.encrypt(nonce, data, b'')\n'
+                            "    return b'FGXENV1' + salt + nonce + ct\n"
+                            "pp = os.environ.get('FGX_BUILD_ENV_PASSPHRASE','').encode('utf-8')\n"
+                            'if not pp:\n'
+                            "    print('no_passphrase', file=sys.stderr); sys.exit(2)\n"
+                            'inp = Path(sys.argv[1]).read_bytes()\n'
+                            'out = enc(pp, inp)\n'
+                            'Path(sys.argv[2]).write_bytes(out)\n'
                         ),
                         encoding='utf-8'
                     )
-                    build_cmd += ["--runtime-hook", str(dec_hook)]
-                    # Add encrypted .env as data
-                    add = f"{enc_out}{';.' if os.name=='nt' else ':.'}"
-                    build_cmd += ["--add-data", add]
-                    await log_cb('debug', 'Included encrypted .env (forgex.env.enc) and decryption hook')
+                    # Determine passphrase (inline for build or provided explicitly)
+                    pp: Optional[str] = None
+                    try:
+                        mode = (env_enc.get('mode') or 'env')
+                        if mode == 'inline':
+                            pp = env_enc.get('passphrase') or ''
+                        else:
+                            # For encryption step at build time we still need a passphrase; fallback to inline if not provided
+                            pp = env_enc.get('passphrase') or ''
+                    except Exception:
+                        pp = ''
+                    if not pp:
+                        # Generate a random dev key and switch runtime mode to inline implicitly
+                        import secrets, base64 as _b64
+                        pp = _b64.urlsafe_b64encode(secrets.token_bytes(32)).decode('utf-8')
+                        env_enc['mode'] = 'inline'
+                        env_enc['passphrase'] = pp
+                        await log_cb('warn', 'No passphrase provided for .env encryption; generated a random inline key (less secure).')
+                    enc_env_vars = env.copy()
+                    enc_env_vars['FGX_BUILD_ENV_PASSPHRASE'] = pp
+                    code = await _run_and_stream([str(py_bin), str(enc_script), str(env_file), str(enc_out)], enc_env_vars, workdir, log_cb, timeout_seconds, cancel_event)
+                    if code == 0 and enc_out.exists():
+                        # Compute digest for integrity hook
+                        import hashlib as _hl
+                        try:
+                            h = _hl.sha256(); h.update(enc_out.read_bytes()); expected_env_sha = h.hexdigest()
+                        except Exception:
+                            expected_env_sha = ''
+                        # Write runtime decrypt hook
+                        dec_hook = workdir / 'forgex_env_decrypt.py'
+                        env_var_name = (env_enc.get('env_var') or 'FGX_ENV_KEY')
+                        file_path = (env_enc.get('file_path') or '')
+                        mode = (env_enc.get('mode') or 'env')
+                        inline_pp = (env_enc.get('passphrase') or '') if mode == 'inline' else ''
+                        # Seal the inline passphrase using the build venv (ensures cryptography is available)
+                        _SEALED_PP_B64 = ''
+                        _PEPPER_B64 = ''
+                        try:
+                            seal_script = workdir / 'forgex_pp_seal.py'
+                            seal_script.write_text(
+                                (
+                                    'import os, sys, base64\n'
+                                    'from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC\n'
+                                    'from cryptography.hazmat.primitives import hashes\n'
+                                    'from cryptography.hazmat.primitives.ciphers.aead import AESGCM\n'
+                                    "pp = (sys.argv[1] if len(sys.argv)>1 else '').encode('utf-8')\n"
+                                    'pep = os.urandom(16)\n'
+                                    'salt = os.urandom(16)\n'
+                                    'nonce = os.urandom(12)\n'
+                                    'kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n'
+                                    'key = kdf.derive(pep)\n'
+                                    "ct = AESGCM(key).encrypt(nonce, pp, b'FGXPP1')\n"
+                                    "sealed = b'FGXPP1' + salt + nonce + ct\n"
+                                    "print(base64.b64encode(sealed).decode('ascii'))\n"
+                                    "print(base64.b64encode(pep).decode('ascii'))\n"
+                                ),
+                                encoding='utf-8'
+                            )
+                            proc = await asyncio.create_subprocess_exec(
+                                str(py_bin), str(seal_script), inline_pp,
+                                cwd=str(workdir), env=env,
+                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                            )
+                            out, err = await proc.communicate()
+                            if proc.returncode == 0:
+                                try:
+                                    txt = out.decode('utf-8', errors='ignore').strip().splitlines()
+                                    if len(txt) >= 2:
+                                        _SEALED_PP_B64, _PEPPER_B64 = txt[0].strip(), txt[1].strip()
+                                except Exception:
+                                    pass
+                        except Exception as _e:
+                            await log_cb('warn', f'Inline passphrase sealing failed; falling back to plaintext inline: {_e}')
+                            _SEALED_PP_B64 = ''
+                            _PEPPER_B64 = ''
+                        dec_hook.write_text(
+                            (
+                                "# Auto-generated by ForgeX: decrypt bundled .env at runtime (sealed inline + DPAPI cache)\n"
+                                "import sys, os, json, base64, hashlib, ctypes, struct\n"
+                                "from pathlib import Path\n"
+                                "from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC\n"
+                                "from cryptography.hazmat.primitives import hashes\n"
+                                "from cryptography.hazmat.primitives.ciphers.aead import AESGCM\n"
+                                "DBG = os.environ.get('FGX_ENV_DEBUG') or ''\n"
+                                "def _dbg(m):\n"
+                                "    if not DBG: return\n"
+                                "    try:\n"
+                                "        exe = getattr(sys, 'executable', sys.argv[0])\n"
+                                "        p = Path(exe).with_suffix('.envload.log')\n"
+                                "        with open(p, 'a', encoding='utf-8') as f: f.write(m + '\n')\n"
+                                "    except Exception: pass\n"
+                                f"_MODE = {repr(mode)}\n"
+                                f"_ENV_VAR = {repr(env_var_name)}\n"
+                                f"_FILE_PATH = {repr(file_path)}\n"
+                                f"_SEALED_PP_B64 = {repr(_SEALED_PP_B64)}\n"
+                                f"_PEPPER_B64 = {repr(_PEPPER_B64)}\n"
+                                f"_EXPECTED_ENV_SHA256 = {repr(expected_env_sha)}\n"
+                                f"_INLINE_PP_FB = {repr(inline_pp)}\n"
+                                "_HDR = b'FGXPP1'\n"
+                                "def _is_windows():\n"
+                                "    return sys.platform.startswith('win')\n"
+                                "def _exe_hash():\n"
+                                "    try:\n"
+                                "        p = Path(getattr(sys, 'executable', sys.argv[0]))\n"
+                                "        h = hashlib.sha256(); h.update(p.read_bytes()); return h.hexdigest()\n"
+                                "    except Exception:\n"
+                                "        return ''\n"
+                                "def _cache_key_name():\n"
+                                "    h = _exe_hash()[:16] if _exe_hash() else 'default'\n"
+                                "    return f'FGX_ENV_{h}'\n"
+                                "def _dpapi_protect(data: bytes) -> bytes:\n"
+                                "    if not _is_windows():\n"
+                                "        return b''\n"
+                                "    # DATA_BLOB struct\n"
+                                "    class DATA_BLOB(ctypes.Structure):\n"
+                                "        _fields_ = [('cbData', ctypes.c_uint), ('pbData', ctypes.POINTER(ctypes.c_byte))]\n"
+                                "    CryptProtectData = ctypes.windll.crypt32.CryptProtectData\n"
+                                "    LocalFree = ctypes.windll.kernel32.LocalFree\n"
+                                "    in_blob = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))\n"
+                                "    out_blob = DATA_BLOB()\n"
+                                "    if not CryptProtectData(ctypes.byref(in_blob), None, None, None, None, 0x01, ctypes.byref(out_blob)):\n"
+                                "        return b''\n"
+                                "    try:\n"
+                                "        res = ctypes.string_at(out_blob.pbData, out_blob.cbData)\n"
+                                "        return res\n"
+                                "    finally:\n"
+                                "        LocalFree(out_blob.pbData)\n"
+                                "def _dpapi_unprotect(data: bytes) -> bytes:\n"
+                                "    if not _is_windows():\n"
+                                "        return b''\n"
+                                "    class DATA_BLOB(ctypes.Structure):\n"
+                                "        _fields_ = [('cbData', ctypes.c_uint), ('pbData', ctypes.POINTER(ctypes.c_byte))]\n"
+                                "    CryptUnprotectData = ctypes.windll.crypt32.CryptUnprotectData\n"
+                                "    LocalFree = ctypes.windll.kernel32.LocalFree\n"
+                                "    in_blob = DATA_BLOB(len(data), ctypes.cast(ctypes.create_string_buffer(data), ctypes.POINTER(ctypes.c_byte)))\n"
+                                "    out_blob = DATA_BLOB()\n"
+                                "    if not CryptUnprotectData(ctypes.byref(in_blob), None, None, None, None, 0x01, ctypes.byref(out_blob)):\n"
+                                "        return b''\n"
+                                "    try:\n"
+                                "        res = ctypes.string_at(out_blob.pbData, out_blob.cbData)\n"
+                                "        return res\n"
+                                "    finally:\n"
+                                "        LocalFree(out_blob.pbData)\n"
+                                "def _cache_put(pp: bytes):\n"
+                                "    if not (_is_windows() and pp):\n"
+                                "        return\n"
+                                "    try:\n"
+                                "        import winreg\n"
+                                "        data = _dpapi_protect(pp)\n"
+                                "        if not data:\n"
+                                "            return\n"
+                                "        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r'Software\\ForgeX\\Cache') as k:\n"
+                                "            winreg.SetValueEx(k, _cache_key_name(), 0, winreg.REG_BINARY, data)\n"
+                                "    except Exception:\n"
+                                "        pass\n"
+                                "def _cache_get() -> bytes:\n"
+                                "    if not _is_windows():\n"
+                                "        return b''\n"
+                                "    try:\n"
+                                "        import winreg\n"
+                                "        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\\ForgeX\\Cache') as k:\n"
+                                "            data, _ = winreg.QueryValueEx(k, _cache_key_name())\n"
+                                "            if isinstance(data, bytes) and data:\n"
+                                "                return _dpapi_unprotect(data)\n"
+                                "    except Exception:\n"
+                                "        return b''\n"
+                                "    return b''\n"
+                                "def _sealed_inline_pp() -> bytes:\n"
+                                "    try:\n"
+                                "        if not _SEALED_PP_B64 or not _PEPPER_B64:\n"
+                                "            return (_INLINE_PP_FB or '').encode('utf-8')\n"
+                                "        raw = base64.b64decode(_SEALED_PP_B64)\n"
+                                "        if not raw.startswith(_HDR):\n"
+                                "            return b''\n"
+                                "        salt = raw[len(_HDR):len(_HDR)+16]; nonce = raw[len(_HDR)+16:len(_HDR)+28]; ct = raw[len(_HDR)+28:]\n"
+                                "        pepper = base64.b64decode(_PEPPER_B64)\n"
+                                "        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n"
+                                "        key = kdf.derive(pepper)\n"
+                                "        aes = AESGCM(key)\n"
+                                "        return aes.decrypt(nonce, ct, _HDR)\n"
+                                "    except Exception:\n"
+                                "        return b''\n"
+                                "def _get_passphrase() -> bytes:\n"
+                                "    # Try DPAPI cache first\n"
+                                "    pp = _cache_get()\n"
+                                "    if pp:\n"
+                                "        return pp\n"
+                                "    # Then resolve from configured mode\n"
+                                "    if _MODE == 'env':\n"
+                                "        v = os.environ.get(_ENV_VAR, '')\n"
+                                "        pp = v.encode('utf-8')\n"
+                                "    elif _MODE == 'file':\n"
+                                "        try:\n"
+                                "            p = Path(_FILE_PATH)\n"
+                                "            pp = p.read_text(encoding='utf-8').strip().encode('utf-8')\n"
+                                "        except Exception:\n"
+                                "            pp = b''\n"
+                                "    elif _MODE == 'inline':\n"
+                                "        pp = _sealed_inline_pp()\n"
+                                "    else:\n"
+                                "        pp = b''\n"
+                                "    if pp:\n"
+                                "        _cache_put(pp)\n"
+                                "    return pp\n"
+                                "def _dec(passphrase: bytes, data: bytes) -> bytes:\n"
+                                "    if not data.startswith(b'FGXENV1'):\n"
+                                "        raise RuntimeError('invalid header')\n"
+                                "    salt = data[7:23]; nonce = data[23:35]; ct = data[35:]\n"
+                                "    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=200000)\n"
+                                "    key = kdf.derive(passphrase)\n"
+                                "    aes = AESGCM(key)\n"
+                                "    return aes.decrypt(nonce, ct, b'')\n"
+                                "try:\n"
+                                "    base = Path(getattr(sys, '_MEIPASS', '')) if getattr(sys, 'frozen', False) else Path(__file__).parent\n"
+                                "    enc_p = base / 'forgex.env.enc'\n"
+                                "    _dbg('[env_dec] enc path: ' + str(enc_p))\n"
+                                "    if _EXPECTED_ENV_SHA256:\n"
+                                "        try:\n"
+                                "            h=hashlib.sha256(); h.update(enc_p.read_bytes());\n"
+                                "            ok = (h.hexdigest() == _EXPECTED_ENV_SHA256)\n"
+                                "            _dbg('[env_dec] digest match: ' + str(ok))\n"
+                                "            if not ok:\n"
+                                "                raise SystemExit(1)\n"
+                                "        except Exception:\n"
+                                "            raise SystemExit(1)\n"
+                                "    raw = None\n"
+                                "    pp = _cache_get()\n"
+                                "    if pp:\n"
+                                "        try:\n"
+                                "            _dbg('[env_dec] using DPAPI cached key')\n"
+                                "            raw = _dec(pp, enc_p.read_bytes())\n"
+                                "        except Exception:\n"
+                                "            _dbg('[env_dec] DPAPI cache decrypt failed; falling back')\n"
+                                "            # DPAPI cache invalid; fall back to sealed-inline/env/file and refresh cache\n"
+                                "            pp2 = b''\n"
+                                "            if _MODE == 'env':\n"
+                                "                v = os.environ.get(_ENV_VAR, '')\n"
+                                "                pp2 = v.encode('utf-8')\n"
+                                "            elif _MODE == 'file':\n"
+                                "                try:\n"
+                                "                    p = Path(_FILE_PATH)\n"
+                                "                    pp2 = p.read_text(encoding='utf-8').strip().encode('utf-8')\n"
+                                "                except Exception:\n"
+                                "                    pp2 = b''\n"
+                                "            elif _MODE == 'inline':\n"
+                                "                pp2 = _sealed_inline_pp()\n"
+                                "            if pp2:\n"
+                                "                _cache_put(pp2)\n"
+                                "                _dbg('[env_dec] refreshed cache from fallback source')\n"
+                                "                raw = _dec(pp2, enc_p.read_bytes())\n"
+                                "    if raw is None:\n"
+                                "        # No cache or couldn't decrypt; resolve fresh and cache\n"
+                                "        pp3 = b''\n"
+                                "        if _MODE == 'env':\n"
+                                "            v = os.environ.get(_ENV_VAR, '')\n"
+                                "            pp3 = v.encode('utf-8')\n"
+                                "        elif _MODE == 'file':\n"
+                                "            try:\n"
+                                "                p = Path(_FILE_PATH)\n"
+                                "                pp3 = p.read_text(encoding='utf-8').strip().encode('utf-8')\n"
+                                "            except Exception:\n"
+                                "                pp3 = b''\n"
+                                "        elif _MODE == 'inline':\n"
+                                "            pp3 = _sealed_inline_pp()\n"
+                                "        if not pp3:\n"
+                                "            raise SystemExit(1)\n"
+                                "        _cache_put(pp3)\n"
+                                "        _dbg('[env_dec] loaded fresh key')\n"
+                                "        raw = _dec(pp3, enc_p.read_bytes())\n"
+                                "    # Load into environment without logging\n"
+                                "    cnt=0\n"
+                                "    for line in raw.decode('utf-8', errors='ignore').splitlines():\n"
+                                "        if not line or line.strip().startswith('#') or '=' not in line:\n"
+                                "            continue\n"
+                                "        k, v = line.split('=', 1)\n"
+                                "        if k and v is not None and (k not in os.environ):\n"
+                                "            os.environ[k.strip()] = v.strip()\n"
+                                "            cnt += 1\n"
+                                "    _dbg('[env_dec] loaded ' + str(cnt) + ' keys')\n"
+                                "    # Best-effort zeroization\n"
+                                "    try:\n"
+                                "        import ctypes\n"
+                                "        ba = bytearray(raw)\n"
+                                "        ctypes.memset(ctypes.addressof(ctypes.c_char.from_buffer(ba)), 0, len(ba))\n"
+                                "    except Exception:\n"
+                                "        pass\n"
+                                "except SystemExit:\n"
+                                "    raise\n"
+                                "except Exception:\n"
+                                "    # Do not crash the app; proceed without .env\n"
+                                "    pass\n"
+                            ),
+                            encoding='utf-8'
+                        )
+                        build_cmd += ['--runtime-hook', str(dec_hook)]
+                        # Add encrypted .env as data
+                        add = f"{enc_out}{';.' if os.name=='nt' else ':.'}"
+                        build_cmd += ['--add-data', add]
+                        await log_cb('info', 'Included encrypted .env (forgex.env.enc) and decryption hook')
+                    else:
+                        await log_cb('warn', 'Failed to encrypt .env; including plaintext .env instead')
+                        add = f"{env_file}{';.' if os.name=='nt' else ':.'}"
+                        build_cmd += ['--add-data', add]
+                        await log_cb('info', f"Bundled .env from {env_file}")
                 else:
-                    await log_cb('warn', 'Failed to encrypt .env; including plaintext .env instead')
-                    env_file = workdir / ".env"
                     add = f"{env_file}{';.' if os.name=='nt' else ':.'}"
-                    build_cmd += ["--add-data", add]
+                    build_cmd += ['--add-data', add]
+                    await log_cb('info', f"Bundled .env from {env_file}")
             else:
-                env_file = workdir / ".env"
-                add = f"{env_file}{';.' if os.name=='nt' else ':.'}"
-                build_cmd += ["--add-data", add]
+                await log_cb('warn', 'include_env=True but no .env found in project')
         except Exception as e:
             await log_cb('warn', f'.env handling failed: {e}')
 
