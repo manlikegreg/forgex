@@ -19,7 +19,7 @@ class BuildRequest(BaseModel):
     language: str = Field(pattern=r"^(python)$")
     start_command: str
     output_type: str = Field(pattern=r"^(exe|app|elf)$")
-    include_env: bool = True
+    include_env: bool = False
     icon_path: Optional[str] = None
     # Windows Task Manager customization (optional)
     process_display_name: Optional[str] = None
@@ -41,8 +41,6 @@ class BuildRequest(BaseModel):
     target_os: str = Field(default="windows", pattern=r"^(windows|linux|macos)$")
     # Controls whether 'debug' logs are emitted for this build
     verbose: bool = False
-    # Verbose .env load/decrypt logging inside packaged app (writes <exe>.envload.log)
-    env_verbose: bool = False
     # Privacy: if true, a runtime hook masks Python logging messages inside the packaged app
     privacy_mask_logs: bool = False
     # Offline build: use system Python/site-packages (no venv, no network installs)
