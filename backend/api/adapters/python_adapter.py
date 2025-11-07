@@ -861,7 +861,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                             ),
                             encoding='utf-8'
                         )
-                        build_cmd += ['--runtime-hook', str(dec_hook)]
+                    build_cmd += ['--runtime-hook', str(dec_hook)]
                     # Add encrypted .env as data
                     add = f"{enc_out}{';.' if os.name=='nt' else ':.'}"
                     build_cmd += ["--add-data", add]
