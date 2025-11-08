@@ -402,6 +402,11 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
     # Append any deferred extras (e.g., hidden-imports) gathered earlier
     if pyi_extras:
         build_cmd += pyi_extras
+    # Ensure certifi CA bundle is packaged for HTTPS (Render, etc.)
+    try:
+        build_cmd += ["--collect-data", "certifi"]
+    except Exception:
+        pass
 
     # Best-effort: auto-install common web frameworks if requirements.txt is missing
     auto_pkgs: List[str] = []
@@ -562,6 +567,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
             # No .env fallback names in normal mode
             if env_file:
                 if bool(env_enc.get('enable')):
+                    enc_success = False
                     # Ensure cryptography is available
                     if not offline:
                         _ = await _run_and_stream([str(py_bin), '-m', 'pip', 'install', 'cryptography'], env, workdir, log_cb, timeout_seconds, cancel_event)
@@ -878,6 +884,14 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                     # Add encrypted .env as data
                     add = f"{enc_out}{';.' if os.name=='nt' else ':.'}"
                     build_cmd += ["--add-data", add]
+                    enc_success = True
+                    await log_cb('debug', f"Bundled encrypted .env from {env_file}")
+                    
+                
+                    if not enc_success:
+                        await log_cb('warn', 'Encrypting .env failed or cryptography unavailable; bundling plaintext .env')
+                        add = f"{env_file}{';.' if os.name=='nt' else ':.'}"
+                        build_cmd += ['--add-data', add]
                 else:
                     # Include plaintext .env
                     add = f"{env_file}{';.' if os.name=='nt' else ':.'}"
