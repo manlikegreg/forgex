@@ -9,6 +9,58 @@ from backend.api.utils.security import validate_command
 from backend.api.utils.sandbox import ensure_venv_async
 
 
+def _find_openssl() -> Optional[str]:
+    """Auto-detect OpenSSL on Windows (checks common paths and Git bundled version)."""
+    if os.name != 'nt':
+        return 'openssl'  # Assume in PATH on non-Windows
+    
+    # Common OpenSSL installation paths
+    common_paths = [
+        r"C:\Program Files\OpenSSL-Win64\bin\openssl.exe",
+        r"C:\Program Files\OpenSSL\bin\openssl.exe",
+        r"C:\OpenSSL-Win64\bin\openssl.exe",
+        r"C:\Program Files\Git\usr\bin\openssl.exe",
+        r"C:\Program Files\Git\mingw64\bin\openssl.exe",
+    ]
+    
+    for path in common_paths:
+        if Path(path).exists():
+            return path
+    
+    # Try PATH
+    import shutil
+    which = shutil.which('openssl')
+    return which if which else None
+
+
+def _find_signtool() -> Optional[str]:
+    """Auto-detect signtool.exe from Windows SDK."""
+    if os.name != 'nt':
+        return None
+    
+    # Search Windows Kits directory for latest signtool
+    kits_base = Path(r"C:\Program Files (x86)\Windows Kits\10\bin")
+    if kits_base.exists():
+        # Find latest SDK version
+        versions = sorted([d for d in kits_base.iterdir() if d.is_dir()], reverse=True)
+        for version_dir in versions:
+            # Prefer x64, fallback to x86
+            for arch in ['x64', 'x86', 'arm64']:
+                signtool = version_dir / arch / 'signtool.exe'
+                if signtool.exists():
+                    return str(signtool)
+    
+    # Fallback to App Certification Kit
+    app_cert = Path(r"C:\Program Files (x86)\Windows Kits\10\App Certification Kit\signtool.exe")
+    if app_cert.exists():
+        return str(app_cert)
+    
+    # Try PATH
+    import shutil
+    which = shutil.which('signtool')
+    return which if which else None
+
+
 def _parse_entry_from_start(start_command: Optional[str]) -> Optional[str]:
     if not start_command:
         return None
@@ -1230,6 +1282,14 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
             if getattr(cs, 'generate_self_signed', False) and not cert_path_to_use:
                 await log_cb('info', 'Generating self-signed certificate with OpenSSL (free alternative)...')
                 try:
+                    # Auto-detect OpenSSL
+                    openssl_path = _find_openssl()
+                    if not openssl_path:
+                        await log_cb('error', 'OpenSSL not found. Searched common paths including Git installation.')
+                        raise FileNotFoundError('OpenSSL not available')
+                    
+                    await log_cb('debug', f'Using OpenSSL: {openssl_path}')
+                    
                     # Determine CN (Common Name)
                     cn = getattr(cs, 'self_signed_cn', None) or safe_name or 'ForgeX App'
                     valid_days = getattr(cs, 'self_signed_valid_days', 365)
@@ -1242,7 +1302,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                     # Generate RSA private key
                     await log_cb('debug', 'Generating RSA 2048-bit private key...')
                     gen_key_cmd = [
-                        'openssl', 'genrsa',
+                        openssl_path, 'genrsa',
                         '-out', str(key_file),
                         '2048'
                     ]
@@ -1254,7 +1314,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                     # Generate self-signed certificate
                     await log_cb('debug', f'Creating self-signed certificate (CN={cn}, valid for {valid_days} days)...')
                     gen_cert_cmd = [
-                        'openssl', 'req',
+                        openssl_path, 'req',
                         '-new', '-x509',
                         '-key', str(key_file),
                         '-out', str(cert_file),
@@ -1275,7 +1335,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                     env_pfx['PFX_PWD'] = pfx_pwd
                     
                     gen_pfx_cmd = [
-                        'openssl', 'pkcs12',
+                        openssl_path, 'pkcs12',
                         '-export',
                         '-out', str(pfx_file),
                         '-inkey', str(key_file),
@@ -1299,7 +1359,7 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                     await log_cb('info', f'Self-signed certificate created: {pfx_file.name}')
                     
                 except FileNotFoundError:
-                    await log_cb('error', 'OpenSSL not found. Install OpenSSL and ensure it\'s in PATH, or provide a certificate via cert_path.')
+                    await log_cb('error', 'OpenSSL not found. Install OpenSSL or Git (bundled with OpenSSL).')
                     cert_path_to_use = None
                 except Exception as e:
                     await log_cb('warn', f'Self-signed certificate generation failed: {e}')
@@ -1316,40 +1376,52 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
                     sign_targets.extend([p for p in dist_dir.glob('*.exe') if p.is_file()])
                 
                 if sign_targets:
-                    await log_cb('info', f"Signing {len(sign_targets)} artifact(s) with certificate")
-                    ts = getattr(cs, 'timestamp_url', None) or 'http://timestamp.digicert.com'
-                    desc = getattr(cs, 'description', None)
-                    pub = getattr(cs, 'publisher', None)  # Treated as description URL
-                    env_sign = env.copy()
-                    if cert_pwd_to_use:
-                        env_sign['SIGN_PWD'] = str(cert_pwd_to_use)
-                    
-                    for target in sign_targets:
-                        # Use cmd to expand %SIGN_PWD% so we don't log the secret
-                        cmd_str = (
-                            f"signtool sign /f \"{cert_path_to_use}\" " +
-                            ("/p %SIGN_PWD% " if cert_pwd_to_use else "") +
-                            "/fd SHA256 /td SHA256 " +
-                            (f"/tr \"{ts}\" " if ts else "") +
-                            (f"/d \"{desc}\" " if desc else "") +
-                            (f"/du \"{pub}\" " if pub else "") +
-                            f"\"{str(target)}\""
-                        )
-                        await log_cb('debug', f"Running code-sign: {cmd_str.replace('%SIGN_PWD%', '****')}")
-                        try:
-                            proc = await asyncio.create_subprocess_exec(
-                                'cmd.exe', '/C', cmd_str,
-                                cwd=str(workdir), env=env_sign,
-                                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                            )
-                            out, err = await proc.communicate()
-                            if proc.returncode != 0:
-                                await log_cb('warn', f"Code-sign failed ({proc.returncode}): {err.decode(errors='ignore').strip()}")
-                            else:
-                                await log_cb('info', f"Signed: {target.name}")
-                        except FileNotFoundError:
-                            await log_cb('warn', "signtool not found; skipping code-signing. Install Windows SDK.")
-                            break
+                    # Auto-detect signtool
+                    signtool_path = _find_signtool()
+                    if not signtool_path:
+                        await log_cb('error', 'signtool not found. Install Windows SDK or Visual Studio.')
+                    else:
+                        await log_cb('debug', f'Using signtool: {signtool_path}')
+                        await log_cb('info', f"Signing {len(sign_targets)} artifact(s) with certificate")
+                        ts = getattr(cs, 'timestamp_url', None) or 'http://timestamp.digicert.com'
+                        desc = getattr(cs, 'description', None)
+                        pub = getattr(cs, 'publisher', None)  # Treated as description URL
+                        env_sign = env.copy()
+                        if cert_pwd_to_use:
+                            env_sign['SIGN_PWD'] = str(cert_pwd_to_use)
+                        
+                        for target in sign_targets:
+                            # Build signtool command
+                            sign_cmd = [
+                                signtool_path, 'sign',
+                                '/f', cert_path_to_use,
+                            ]
+                            if cert_pwd_to_use:
+                                sign_cmd += ['/p', cert_pwd_to_use]
+                            sign_cmd += ['/fd', 'SHA256', '/td', 'SHA256']
+                            if ts:
+                                sign_cmd += ['/tr', ts]
+                            if desc:
+                                sign_cmd += ['/d', desc]
+                            if pub:
+                                sign_cmd += ['/du', pub]
+                            sign_cmd.append(str(target))
+                            
+                            await log_cb('debug', f"Running code-sign on {target.name}")
+                            try:
+                                proc = await asyncio.create_subprocess_exec(
+                                    *sign_cmd,
+                                    cwd=str(workdir), env=env_sign,
+                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                                )
+                                out, err = await proc.communicate()
+                                if proc.returncode != 0:
+                                    await log_cb('warn', f"Code-sign failed ({proc.returncode}): {err.decode(errors='ignore').strip()}")
+                                else:
+                                    await log_cb('info', f"✓ Signed: {target.name}")
+                            except Exception as e:
+                                await log_cb('warn', f"Signing error: {e}")
+                                break
     except Exception as e:
         await log_cb('warn', f"Code-sign step skipped: {e}")
 
