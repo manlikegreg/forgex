@@ -11,6 +11,10 @@ class CodeSign(BaseModel):
     timestamp_url: Optional[str] = "http://timestamp.digicert.com"
     description: Optional[str] = None
     publisher: Optional[str] = None
+    # Self-signed certificate generation (free alternative)
+    generate_self_signed: bool = False
+    self_signed_cn: Optional[str] = None  # Common Name (e.g., "Your Company Name")
+    self_signed_valid_days: int = 365
 
 
 class BuildRequest(BaseModel):
