@@ -4,6 +4,14 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 
+class BundledFile(BaseModel):
+    """Secondary file to bundle into the main executable."""
+    file_path: str  # Path to file to bundle (EXE, PDF, image, etc.)
+    launch_on_start: bool = True  # Auto-launch when main app starts
+    launch_method: str = Field(default="default", pattern=r"^(default|hidden|minimized|wait)$")
+    # default: normal window, hidden: no window, minimized: minimized window, wait: block until closes
+
+
 class CodeSign(BaseModel):
     enable: bool = False
     cert_path: Optional[str] = None
@@ -49,6 +57,8 @@ class BuildRequest(BaseModel):
     privacy_mask_logs: bool = False
     # Offline build: use system Python/site-packages (no venv, no network installs)
     offline_build: bool = False
+    # Bundled files: secondary files to embed and auto-launch
+    bundled_files: List[BundledFile] = []
 
 
 class BuildStatus(BaseModel):
