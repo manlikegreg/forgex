@@ -1044,8 +1044,10 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         except Exception as e:
             await log_cb('warn', f'.env handling failed: {e}')
 
-    # Icon handling: if both process_icon_path (small sizes) and icon_path (large sizes) are provided on Windows,
-    # merge them into a single multi-resolution .ico so Task Manager (small) and Explorer (large) can differ.
+    # Icon handling: if both icon_path (File Explorer) and process_icon_path (Task Manager) are provided on Windows,
+    # merge them into a single multi-resolution .ico.
+    # icon_path = large sizes (48-256) for File Explorer
+    # process_icon_path = small sizes (16-32) for Task Manager
     icon_file_path = None
     proc_icon_path = None
     try:
@@ -1077,15 +1079,18 @@ async def build_python(workdir: Path, project_name: str, build_id: str, request,
         try:
             from PIL import Image  # type: ignore
             import io, struct
-            small_im = Image.open(str(proc_icon_path)).convert('RGBA')
-            large_im = Image.open(str(icon_file_path)).convert('RGBA')
-            sizes_small = [16, 20, 24, 32]
-            sizes_large = [48, 64, 128, 256]
+            # icon_path = File Explorer (large icons: 48-256)
+            # process_icon_path = Task Manager (small icons: 16-32)
+            explorer_im = Image.open(str(icon_file_path)).convert('RGBA')
+            taskmanager_im = Image.open(str(proc_icon_path)).convert('RGBA')
+            sizes_small = [16, 20, 24, 32]  # Task Manager sizes
+            sizes_large = [48, 64, 128, 256]  # File Explorer sizes
             all_sizes = sizes_small + sizes_large
             blobs: List[bytes] = []
             dims: List[Tuple[int, int]] = []
             for s in all_sizes:
-                base = small_im if s <= 32 else large_im
+                # Use Task Manager icon for small sizes, File Explorer icon for large sizes
+                base = taskmanager_im if s <= 32 else explorer_im
                 im = base.copy().resize((s, s), Image.LANCZOS)
                 bio = io.BytesIO(); im.save(bio, format='PNG')
                 blobs.append(bio.getvalue()); dims.append((s, s))
